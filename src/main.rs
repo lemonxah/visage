@@ -33,7 +33,7 @@ pub enum FaceSetup {
     Dummy,
     #[cfg(feature = "openxr")]
     /// Retrieve face data from OpenXR (WiVRn / Monado)
-    Openxr,
+    Openxr(core::OpenXrArgs),
 
     #[cfg(feature = "alvr")]
     /// Retrieve face data from ALVR
@@ -88,4 +88,40 @@ pub struct Args {
     /// How face tracking is sent to VRC
     #[arg(long, value_enum, default_value_t = FtMode::Auto)]
     ft_mode: FtMode,
+}
+
+#[cfg(all(test, feature = "openxr", feature = "babble"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn combined_openxr_babble_accepts_default_and_custom_ports() {
+        for (tail, port) in [
+            (vec!["--babble", "--independent-eyes"], 9400),
+            (vec!["--babble", "9500", "--independent-eyes"], 9500),
+        ] {
+            let mut command = vec!["oscavmgr", "openxr"];
+            command.extend(tail);
+            let args = Args::try_parse_from(command).unwrap();
+            let FaceSetup::Openxr(args) = args.face else {
+                panic!("expected OpenXR")
+            };
+            assert_eq!(args.babble, Some(port));
+            assert!(args.independent_eyes);
+        }
+        assert!(Args::try_parse_from(["oscavmgr", "openxr", "--babble", "0"]).is_err());
+    }
+
+    #[cfg(feature = "qpro-tongue")]
+    #[test]
+    fn babble_and_camera_tongue_cannot_write_the_same_mouth() {
+        assert!(Args::try_parse_from([
+            "oscavmgr",
+            "openxr",
+            "--babble",
+            "--tongue-model",
+            "gate.onnx"
+        ])
+        .is_err());
+    }
 }

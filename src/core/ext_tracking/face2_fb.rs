@@ -82,6 +82,17 @@ enum Face2Fb {
     Max,
 }
 
+pub(crate) fn eye_look_x(face_fb: &[f32]) -> Option<(f32, f32)> {
+    if face_fb.len() < FaceFb::Max as usize {
+        return None;
+    }
+    let getf = |index| face_fb[index as usize];
+    Some((
+        getf(FaceFb::EyesLookRightL) - getf(FaceFb::EyesLookLeftL),
+        getf(FaceFb::EyesLookRightR) - getf(FaceFb::EyesLookLeftR),
+    ))
+}
+
 pub(crate) fn face2_fb_to_unified(face_fb: &[f32]) -> Option<UnifiedShapes> {
     let mut shapes: UnifiedShapes = [0.0; NUM_SHAPES];
     if face_fb.len() < FaceFb::Max as usize {

@@ -42,6 +42,78 @@ oscavmgr alvr
 oscavmgr babble
 ```
 
+For a rooted Quest Pro with the camera streamer in `../qpro-ft` and the v15
+pretrained models installed locally, run:
+
+```bash
+./start.sh
+```
+
+This launches WiVRn, starts the mouth-camera relay and port forward, and runs the
+local release binary with the Qpro Companion v3.0.3 Developer v15 visibility model
+and its paired direction model. Personal calibration is optional. WiVRn supplies
+ordinary face, brow, blink and gaze data; the camera models add tongue tracking.
+Babble/Baballonia is off by default. The launcher enables `--independent-eyes`
+for estimated horizontal eye convergence; set `INDEPENDENT_EYES=0` to disable
+that estimate. This PC option does not install or activate the headset's
+independent-gaze patch. Connect WiVRn with eye and face tracking enabled and close other
+camera viewers first. Press Ctrl+C to stop OscAvMgr and its relay/port forward.
+The binary must be built with `cargo build --release --features qpro-tongue`.
+
+The model files are in `models/qpro-companion-v3.0.3/` and are ignored by Git. To
+reproduce the installation, download the official
+[QproCompanion.V3.0.3.zip](https://github.com/Fwooffy/Qpro-Enhanced-FT-Wireless/releases/download/v3.0.3/QproCompanion.V3.0.3.zip),
+then run this one-time conversion with PyTorch and ONNX installed:
+
+```bash
+python3 contrib/setup_qpro_v15.py /path/to/QproCompanion.V3.0.3.zip
+```
+
+The converter verifies the pinned archive and member checksums, preserves the
+release's model metadata/license, and records converted model hashes in
+`provenance.json`. Live inference needs neither Python nor PyTorch. Both exported
+models have been compared against OpenCV/PyTorch reference outputs on three
+synthetic image patterns; this verifies conversion, not tracking accuracy for a
+particular wearer. The upstream model remains experimental and has limited
+independent-wearer validation. The original v8 files in `../qpro-ft/models` remain
+available through `TONGUE_MODEL` and `TONGUE_DIRECTION_MODEL` overrides.
+
+The defaults are weighted visibility using the v15 model's camera weight 0.6,
+a launcher threshold of 0.573 (overriding the model's 0.5), and motion smoothing 55.
+With native tongue confidence zero, activation requires camera confidence of
+about 0.955. A threshold of 0.6 reaches the fused score ceiling and can prevent
+activation. Set `TONGUE_THRESHOLD=` to use the model's original threshold.
+Detection confidence gates the tongue;
+the separate extension prediction sets how far the tongue sticks out. Set
+`TONGUE_ENABLED=0 ./start.sh` to use only WiVRn's ordinary tracking.
+
+If `agreement` prevents tongue activation, its native tongue score may be too
+low. To inspect the camera and native scores while smiling and sticking your
+tongue out, run `TONGUE_DEBUG=1 ./start.sh`. The log shows
+the active threshold and whether the visibility gate is open. Set
+`TONGUE_THRESHOLD` to override the model's threshold with a value greater than 0
+and at most 1; choose a value above smile scores and below tongue-out scores.
+If those scores overlap, a threshold alone cannot distinguish the expressions.
+
+For smile false positives, stop OscAvMgr and run `./calibrate-tongue.sh` to collect
+labeled camera samples. It starts and stops the relay automatically, uses only
+Python's standard library, and needs no native tongue label stream. Keep the
+headset in its usual position, follow each pose prompt, and press Enter while
+holding the pose until the image is saved. Four rounds capture 28 images of
+neutral, smiling, mouth-open, and tongue-out poses. The images and labels are saved
+under `captures/qpro-calibration/` for inspection and personal model calibration;
+the script does not train or replace a model. These captures are ignored by Git.
+
+For the optional combination of WiVRn eyes/brows with Babble mouth data, run
+`TONGUE_ENABLED=0 BABBLE_ENABLED=1 ./start.sh`, or use the direct command
+`./target/release/oscavmgr openxr --babble --independent-eyes`. Configure Babble's
+OSC output as `127.0.0.1:9400` with an empty prefix/location, and keep its camera
+bridge running separately. Use `--babble 9500` or `BABBLE_PORT=9500` to change the
+port. Only fresh Babble mouth values override WiVRn; after one second without an
+update, each mouth value falls back to WiVRn. Eye data on the Babble port cannot
+overwrite WiVRn gaze or blinks. Camera tongue and Babble mouth cannot be enabled
+together. This combined mode requires both `openxr` and `babble` build features.
+
 ## Using with VRChat
 
 Once OscAvMgr is started, it will print further instructions to the terminal.

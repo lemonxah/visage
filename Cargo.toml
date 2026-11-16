@@ -30,9 +30,11 @@ hickory-proto = { version = "0.26.1", features = ["mdns"] }
 socket2 = "0.6.5"
 if-addrs = { version = "0.15.0", features = ["link-local"] }
 mdns-sd = "0.20.3"
+ort = { version = "=2.0.0-rc.15", optional = true, default-features = false, features = ["std", "download-binaries", "tls-native", "copy-dylibs", "api-31"] }
 
 [features]
 default = ["alvr", "openxr", "babble"]
 alvr = ["dep:alvr_events", "dep:alvr_common", "dep:sysinfo"]
 openxr = ["dep:openxr"]
 babble = []
+qpro-tongue = ["openxr", "dep:ort"]

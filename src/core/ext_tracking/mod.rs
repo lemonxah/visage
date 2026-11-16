@@ -15,6 +15,8 @@ use self::alvr::AlvrReceiver;
 use self::babble::BabbleEtvrReceiver;
 
 #[cfg(feature = "openxr")]
+pub use self::openxr::OpenXrArgs;
+#[cfg(feature = "openxr")]
 use self::openxr::OpenXrReceiver;
 
 use self::unified::{CombinedExpression, UnifiedExpressions, UnifiedTrackingData, NUM_SHAPES};
@@ -36,8 +38,12 @@ mod face2_fb;
 mod htc;
 #[cfg(feature = "openxr")]
 mod openxr;
+#[cfg(feature = "qpro-tongue")]
+mod qpro_tongue;
 mod sranipal;
 pub mod unified;
+#[cfg(feature = "openxr")]
+mod vergence;
 
 trait FaceReceiver {
     fn start_loop(&mut self);
@@ -128,7 +134,16 @@ impl ExtTracking {
             #[cfg(feature = "alvr")]
             FaceSetup::Alvr => Box::new(AlvrReceiver::new()),
             #[cfg(feature = "openxr")]
-            FaceSetup::Openxr => Box::new(OpenXrReceiver::new()),
+            FaceSetup::Openxr(args) => {
+                #[cfg(feature = "babble")]
+                let receiver: Box<dyn FaceReceiver> = match args.babble {
+                    Some(port) => Box::new(openxr::OpenXrBabbleReceiver::new(args, port)),
+                    None => Box::new(OpenXrReceiver::new(args)),
+                };
+                #[cfg(not(feature = "babble"))]
+                let receiver: Box<dyn FaceReceiver> = Box::new(OpenXrReceiver::new(args));
+                receiver
+            }
             #[cfg(feature = "babble")]
             FaceSetup::Babble { listen } => Box::new(BabbleEtvrReceiver::new(listen)),
         };

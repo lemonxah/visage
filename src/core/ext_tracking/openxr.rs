@@ -13,9 +13,12 @@ use strum::EnumCount;
 
 use crate::core::{AppState, INSTRUCTIONS_END, INSTRUCTIONS_START, TRACK_ON};
 
+#[cfg(feature = "qpro-tongue")]
+use super::qpro_tongue::{QproTongue, TongueArgs};
 use super::{
     htc::{htc_to_unified, HtcFacialData},
     unified::{UnifiedExpressions, UnifiedShapeAccessors, UnifiedTrackingData},
+    vergence::Vergence,
     FaceReceiver,
 };
 
@@ -24,16 +27,87 @@ static STA_GAZE_OFF: Lazy<Arc<str>> = Lazy::new(|| format!("{}", "GAZE".color(Co
 static STA_FACE: Lazy<Arc<str>> = Lazy::new(|| format!("{}", "FACE".color(Color::Green)).into());
 static STA_FACE_OFF: Lazy<Arc<str>> = Lazy::new(|| format!("{}", "FACE".color(Color::Red)).into());
 
+#[derive(Clone, Debug, Default, clap::Args)]
+pub struct OpenXrArgs {
+    #[arg(
+        long,
+        help = "Split the combined gaze into per-eye gaze using the per-eye look blendshapes"
+    )]
+    pub independent_eyes: bool,
+
+    #[cfg(feature = "babble")]
+    #[arg(
+        long,
+        value_name = "PORT",
+        num_args = 0..=1,
+        default_missing_value = "9400",
+        value_parser = clap::value_parser!(u16).range(1..),
+        help = "Use Babble mouth data alongside OpenXR gaze, blinks and brows (default port 9400)"
+    )]
+    pub babble: Option<u16>,
+
+    #[cfg(feature = "qpro-tongue")]
+    #[command(flatten)]
+    pub tongue: TongueArgs,
+}
+
+struct Extras {
+    vergence: Option<Vergence>,
+    #[cfg(feature = "qpro-tongue")]
+    tongue: Option<QproTongue>,
+}
+
+#[cfg(feature = "babble")]
+pub(super) struct OpenXrBabbleReceiver {
+    openxr: OpenXrReceiver,
+    openxr_data: UnifiedTrackingData,
+    babble: super::babble::BabbleEtvrReceiver,
+}
+
+#[cfg(feature = "babble")]
+impl OpenXrBabbleReceiver {
+    pub fn new(args: OpenXrArgs, port: u16) -> Self {
+        Self {
+            openxr: OpenXrReceiver::new(args),
+            openxr_data: UnifiedTrackingData::default(),
+            babble: super::babble::BabbleEtvrReceiver::new(port),
+        }
+    }
+}
+
+#[cfg(feature = "babble")]
+impl FaceReceiver for OpenXrBabbleReceiver {
+    fn start_loop(&mut self) {
+        self.openxr.start_loop();
+        self.babble.start_mouth_loop();
+    }
+
+    fn receive(&mut self, data: &mut UnifiedTrackingData, app: &mut AppState) {
+        self.openxr.receive(&mut self.openxr_data, app);
+        // Keep the native baseline separate: Babble and calc_combined must not
+        // overwrite it, so expired mouth values can fall back on the next tick.
+        data.eyes = self.openxr_data.eyes;
+        data.shapes.copy_from_slice(&self.openxr_data.shapes);
+        self.babble.receive_mouth(data, app);
+    }
+}
+
 pub struct OpenXrReceiver {
     state: Option<XrState>,
     last_attempt: Instant,
+    extras: Extras,
 }
 
 impl OpenXrReceiver {
-    pub fn new() -> Self {
+    pub fn new(args: OpenXrArgs) -> Self {
         Self {
             state: None,
             last_attempt: Instant::now(),
+            extras: Extras {
+                vergence: args.independent_eyes.then(Vergence::new),
+                #[cfg(feature = "qpro-tongue")]
+                tongue: QproTongue::new(args.tongue),
+            },
         }
     }
 
@@ -72,7 +146,7 @@ impl FaceReceiver for OpenXrReceiver {
             return;
         };
 
-        if let Err(e) = state.receive(data, app) {
+        if let Err(e) = state.receive(data, app, &mut self.extras) {
             log::error!("XR: {}", e);
             self.state = None;
         }
@@ -207,6 +281,7 @@ impl XrState {
         &mut self,
         data: &mut UnifiedTrackingData,
         state: &mut AppState,
+        extras: &mut Extras,
     ) -> anyhow::Result<()> {
         while let Some(event) = self.instance.poll_event(&mut self.events)? {
             use xr::Event::*;
@@ -267,6 +342,10 @@ impl XrState {
         let aim_loc = self.aim_spaces[1].locate(&self.stage_space, next_frame)?;
         state.tracking.right_hand = to_affine(&aim_loc);
 
+        let mut gaze_fresh = false;
+        #[cfg(feature = "qpro-tongue")]
+        let mut native_tongue = None;
+
         let eye_loc = self.eye_space.locate(&self.view_space, next_frame)?;
         if eye_loc.location_flags.contains(
             xr::SpaceLocationFlags::ORIENTATION_VALID | xr::SpaceLocationFlags::ORIENTATION_TRACKED,
@@ -296,6 +375,7 @@ impl XrState {
 
             data.eyes[0] = Some(vec3(x, y, z));
             data.eyes[1] = data.eyes[0];
+            gaze_fresh = true;
             state.status.add_item(STA_GAZE.clone());
         } else {
             state.status.add_item(STA_GAZE_OFF.clone());
@@ -315,6 +395,24 @@ impl XrState {
                 if let Some(shapes) = super::face2_fb::face2_fb_to_unified(&weights) {
                     data.shapes[..=UnifiedExpressions::COUNT]
                         .copy_from_slice(&shapes[..=UnifiedExpressions::COUNT]);
+                    #[cfg(feature = "qpro-tongue")]
+                    {
+                        native_tongue = Some(data.getu(UnifiedExpressions::TongueOut));
+                    }
+                }
+                if gaze_fresh {
+                    if let (Some(vergence), Some(combined), Some((left_x, right_x))) = (
+                        extras.vergence.as_mut(),
+                        data.eyes[0],
+                        super::face2_fb::eye_look_x(&weights),
+                    ) {
+                        let [left, right] = vergence.split(combined, left_x, right_x);
+                        data.eyes = [Some(left), Some(right)];
+                        let convergence = (right.y - left.y).to_degrees();
+                        state
+                            .status
+                            .add_item(format!("VERG:{convergence:+.1}°").into());
+                    }
                 }
                 state.status.add_item(STA_FACE.clone());
             } else {
@@ -333,6 +431,11 @@ impl XrState {
             } else {
                 state.status.add_item(STA_FACE_OFF.clone());
             }
+        }
+
+        #[cfg(feature = "qpro-tongue")]
+        if let Some(tongue) = extras.tongue.as_mut() {
+            tongue.apply(native_tongue, data, &mut state.status);
         }
 
         Ok(())

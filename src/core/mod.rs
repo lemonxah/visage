@@ -26,6 +26,8 @@ mod ext_gogo;
 mod ext_oscjson;
 mod ext_storage;
 mod ext_tracking;
+#[cfg(feature = "openxr")]
+pub use ext_tracking::OpenXrArgs;
 mod folders;
 mod oscquery;
 mod watchdog;
