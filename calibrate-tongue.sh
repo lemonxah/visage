@@ -2,8 +2,8 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-QPRO_DIR="${QPRO_DIR:-../qpro-ft}"
-HEADSET_STREAM_SCRIPT="${HEADSET_STREAM_SCRIPT:-$QPRO_DIR/headset-stream.sh}"
+HEADSET_STREAM_SCRIPT="${HEADSET_STREAM_SCRIPT:-./headset-stream.sh}"
+ADB="${ADB:-adb}"
 TONGUE_PORT="${TONGUE_PORT:-27273}"
 
 if [[ "${1:-}" == --help || "${1:-}" == -h ]]; then
@@ -17,14 +17,14 @@ echo "Close OscAvMgr and other camera viewers before capture. Keep WiVRn face tr
 cleanup() {
     trap - EXIT INT TERM
     PORT="$TONGUE_PORT" bash "$HEADSET_STREAM_SCRIPT" stop || true
-    adb forward --remove "tcp:$TONGUE_PORT" >/dev/null 2>&1 || true
+    "$ADB" forward --remove "tcp:$TONGUE_PORT" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
 PORT="$TONGUE_PORT" MODE=mouth MAX_FPS=12 bash "$HEADSET_STREAM_SCRIPT" start
-adb forward "tcp:$TONGUE_PORT" tcp:27273 >/dev/null
+"$ADB" forward "tcp:$TONGUE_PORT" tcp:27273 >/dev/null
 python3 contrib/qpro_tongue_capture.py \
     --port "$TONGUE_PORT" \
     --output "captures/qpro-calibration/$(date +%Y%m%d-%H%M%S)" "$@"

@@ -1,0 +1,39 @@
+{
+  "release": "v3.0.3",
+  "modelVersion": 15,
+  "downloadUrl": "https://github.com/Fwooffy/Qpro-Enhanced-FT-Wireless/releases/download/v3.0.3/QproCompanion.V3.0.3.zip",
+  "archiveSha256": "2c9004bdd8ecb29d5795e5cdb91b71dd525242a4b295d257a47c77d3ee7cec0a",
+  "architectureSourceSha256": "0e853cdb80f3a82efa3720f92568f56108299633e4f8131bc4fe1ddbea124797",
+  "torchVersion": "2.15.0",
+  "onnxVersion": "1.22.0",
+  "models": [
+    {
+      "role": "gate",
+      "checkpoint": "qpro-stereo-tongue-v15-gate.pt",
+      "checkpointSha256": "dbe22ab74943ce9b134bb17a4dbacdbc4c781d9943005cfa3548fc958441015c",
+      "onnx": "qpro-stereo-tongue-v15-gate.onnx",
+      "onnxSha256": "069b427118e321374431c0c5a0d2ed82b907c4525273ac36375ff5763472938b",
+      "imageSize": 224,
+      "inputPreprocessing": "raw-v1",
+      "visibilityGate": {
+        "formula": "w * camera_visibility + (1-w) * native_TongueOut",
+        "cameraWeight": 0.6,
+        "threshold": 0.5
+      }
+    },
+    {
+      "role": "direction",
+      "checkpoint": "qpro-stereo-tongue-v15-direction.pt",
+      "checkpointSha256": "1900e8761c9ceaf89069121af1016ba24c33849836a5b7ee94b4dfd9fc7db396",
+      "onnx": "qpro-stereo-tongue-v15-direction.onnx",
+      "onnxSha256": "8b47078e47ec4ed2e2779376b51070a20539c016a43f82e3e913d4dfc771c2da",
+      "imageSize": 192,
+      "inputPreprocessing": "raw-v1",
+      "visibilityGate": {
+        "formula": "w * camera_visibility + (1-w) * native_TongueOut",
+        "cameraWeight": 0.95,
+        "threshold": 0.43999999999999995
+      }
+    }
+  ]
+}

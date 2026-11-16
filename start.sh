@@ -6,8 +6,8 @@ cd "$(dirname "$0")"
 OSCAVMGR="${OSCAVMGR:-./target/release/oscavmgr}"
 FT_MODE="${FT_MODE:-auto}"
 INDEPENDENT_EYES="${INDEPENDENT_EYES:-1}"
-QPRO_DIR="${QPRO_DIR:-../qpro-ft}"
-HEADSET_STREAM_SCRIPT="${HEADSET_STREAM_SCRIPT:-$QPRO_DIR/headset-stream.sh}"
+HEADSET_STREAM_SCRIPT="${HEADSET_STREAM_SCRIPT:-./headset-stream.sh}"
+ADB="${ADB:-adb}"
 
 # Pretrained developer model from the verified Qpro Companion v3.0.3 release.
 TONGUE_ENABLED="${TONGUE_ENABLED:-1}"
@@ -20,8 +20,8 @@ TONGUE_PORT="${TONGUE_PORT:-27273}"
 HEADSET_TONGUE_PORT="${HEADSET_TONGUE_PORT:-27273}"
 TONGUE_SMOOTHING="${TONGUE_SMOOTHING:-55}"
 TONGUE_VISIBILITY="${TONGUE_VISIBILITY:-weighted}"
-# With v15's camera weight 0.6 and a zero native score, 0.573 requires
-# camera confidence of about 0.955 while staying below the fused ceiling of 0.6.
+# With v15's camera weight 0.6 and a zero native score, 0.575 requires
+# camera confidence of about 0.958 while staying below the fused ceiling of 0.6.
 TONGUE_THRESHOLD="${TONGUE_THRESHOLD-0.575}"
 TONGUE_DEBUG="${TONGUE_DEBUG:-0}"
 TONGUE_THREADS="${TONGUE_THREADS:-2}"
@@ -75,15 +75,15 @@ preflight() {
 }
 
 require_device() {
-  command -v adb >/dev/null 2>&1 || die "adb not found on PATH."
-  adb start-server >/dev/null 2>&1 || true
-  adb get-state >/dev/null 2>&1 || die "No adb device. Plug in the headset and allow USB debugging."
-  say "adb device: $(adb get-serialno 2>/dev/null)"
+  command -v "$ADB" >/dev/null 2>&1 || die "adb not found: $ADB"
+  "$ADB" start-server >/dev/null 2>&1 || true
+  "$ADB" get-state >/dev/null 2>&1 || die "No adb device. Plug in the headset and allow USB debugging."
+  say "adb device: $("$ADB" get-serialno 2>/dev/null)"
 }
 
 require_headset_root() {
   local uid
-  uid="$(adb shell 'su -c "id -u"' 2>/dev/null | tr -d '\r')"
+  uid="$("$ADB" shell 'su -c "id -u"' 2>/dev/null | tr -d '\r')"
   [ "$uid" = "0" ] || die "Headset not rooted this session. Root with Singularity first, then re-run."
   say "headset root: ok"
 }
@@ -94,22 +94,22 @@ launch_wivrn() {
     return
   }
   local activity
-  activity="$(adb shell cmd package resolve-activity --brief -c android.intent.category.LAUNCHER "$WIVRN_PACKAGE" 2>/dev/null | tr -d '\r' | tail -n1)"
+  activity="$("$ADB" shell cmd package resolve-activity --brief -c android.intent.category.LAUNCHER "$WIVRN_PACKAGE" 2>/dev/null | tr -d '\r' | tail -n1)"
   [[ "$activity" == */* ]] || die "WiVRn package '$WIVRN_PACKAGE' not found. Set WIVRN_PACKAGE."
   say "launching WiVRn client: $activity"
-  adb shell am start -n "$activity" >/dev/null
+  "$ADB" shell am start -n "$activity" >/dev/null
 }
 
 start_streamer() {
   if [ -n "$STREAMER_ACTIVITY" ]; then
     say "starting camera streamer: $STREAMER_ACTIVITY"
-    adb shell am start -n "$STREAMER_ACTIVITY" >/dev/null
+    "$ADB" shell am start -n "$STREAMER_ACTIVITY" >/dev/null
   elif [ -n "$STREAMER_SHELL" ]; then
     say "starting camera streamer (shell)"
     if [ "$STREAMER_NEEDS_ROOT" = "1" ]; then
-      adb shell "su -c 'nohup $STREAMER_SHELL >/dev/null 2>&1 &'" >/dev/null
+      "$ADB" shell "su -c 'nohup $STREAMER_SHELL >/dev/null 2>&1 &'" >/dev/null
     else
-      adb shell "nohup $STREAMER_SHELL >/dev/null 2>&1 &" >/dev/null
+      "$ADB" shell "nohup $STREAMER_SHELL >/dev/null 2>&1 &" >/dev/null
     fi
   else
     say "starting Quest Pro mouth-camera relay"
@@ -121,8 +121,8 @@ start_streamer() {
 
 setup_forward() {
   forward_managed=1
-  adb forward --remove "tcp:${TONGUE_PORT}" >/dev/null 2>&1 || true
-  adb forward "tcp:${TONGUE_PORT}" "tcp:${HEADSET_TONGUE_PORT}" >/dev/null
+  "$ADB" forward --remove "tcp:${TONGUE_PORT}" >/dev/null 2>&1 || true
+  "$ADB" forward "tcp:${TONGUE_PORT}" "tcp:${HEADSET_TONGUE_PORT}" >/dev/null
   say "forwarding localhost:${TONGUE_PORT} -> headset:${HEADSET_TONGUE_PORT}"
 }
 
@@ -137,7 +137,7 @@ cleanup() {
     PORT="$TONGUE_PORT" bash "$HEADSET_STREAM_SCRIPT" stop || warn "Could not stop headset relay."
   fi
   if [ "$forward_managed" = "1" ]; then
-    adb forward --remove "tcp:${TONGUE_PORT}" >/dev/null 2>&1 || true
+    "$ADB" forward --remove "tcp:${TONGUE_PORT}" >/dev/null 2>&1 || true
   fi
 }
 

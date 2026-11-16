@@ -42,10 +42,11 @@ oscavmgr alvr
 oscavmgr babble
 ```
 
-For a rooted Quest Pro with the camera streamer in `../qpro-ft` and the v15
-pretrained models installed locally, run:
+For a rooted Quest Pro, this repository includes the headset camera helper and
+the v15 pretrained ONNX models. Build OscAvMgr once, then run:
 
 ```bash
+cargo build --release --features qpro-tongue
 ./start.sh
 ```
 
@@ -58,12 +59,22 @@ for estimated horizontal eye convergence; set `INDEPENDENT_EYES=0` to disable
 that estimate. This PC option does not install or activate the headset's
 independent-gaze patch. Connect WiVRn with eye and face tracking enabled and close other
 camera viewers first. Press Ctrl+C to stop OscAvMgr and its relay/port forward.
-The binary must be built with `cargo build --release --features qpro-tongue`.
+ADB must be installed and the headset must already be rooted. The helper's
+binaries, C sources, license, and optional Android NDK build script are in
+[`headset/`](headset/README.md); no separate `qpro-ft` checkout is needed.
+`HEADSET_STREAM_SCRIPT` can override the bundled `./headset-stream.sh` helper.
 
-The model files are in `models/qpro-companion-v3.0.3/` and are ignored by Git. To
-reproduce the installation, download the official
+The model files are included in `models/qpro-companion-v3.0.3/` (about 31 MB total):
+
+- `qpro-stereo-tongue-v15-gate.onnx`: tongue visibility and extension.
+- `qpro-stereo-tongue-v15-direction.onnx`: tongue direction and shape.
+
+Their upstream metadata and MIT license, conversion provenance with SHA-256
+hashes, and reference-output verification results are included alongside them.
+Normal startup needs no model download or Python installation. To reproduce the
+ONNX exports, download the official
 [QproCompanion.V3.0.3.zip](https://github.com/Fwooffy/Qpro-Enhanced-FT-Wireless/releases/download/v3.0.3/QproCompanion.V3.0.3.zip),
-then run this one-time conversion with PyTorch and ONNX installed:
+then run the converter with PyTorch and ONNX installed:
 
 ```bash
 python3 contrib/setup_qpro_v15.py /path/to/QproCompanion.V3.0.3.zip
@@ -75,13 +86,14 @@ release's model metadata/license, and records converted model hashes in
 models have been compared against OpenCV/PyTorch reference outputs on three
 synthetic image patterns; this verifies conversion, not tracking accuracy for a
 particular wearer. The upstream model remains experimental and has limited
-independent-wearer validation. The original v8 files in `../qpro-ft/models` remain
-available through `TONGUE_MODEL` and `TONGUE_DIRECTION_MODEL` overrides.
+independent-wearer validation. Extracted PyTorch checkpoints and training source
+remain ignored by Git. Use `TONGUE_MODEL` and `TONGUE_DIRECTION_MODEL` to select
+other compatible models.
 
 The defaults are weighted visibility using the v15 model's camera weight 0.6,
-a launcher threshold of 0.573 (overriding the model's 0.5), and motion smoothing 55.
+a launcher threshold of 0.575 (overriding the model's 0.5), and motion smoothing 55.
 With native tongue confidence zero, activation requires camera confidence of
-about 0.955. A threshold of 0.6 reaches the fused score ceiling and can prevent
+about 0.958. A threshold of 0.6 reaches the fused score ceiling and can prevent
 activation. Set `TONGUE_THRESHOLD=` to use the model's original threshold.
 Detection confidence gates the tongue;
 the separate extension prediction sets how far the tongue sticks out. Set
