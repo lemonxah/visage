@@ -5,7 +5,7 @@ use rosc::{OscBundle, OscType};
 use serde::{Deserialize, Serialize};
 
 use super::bundle::AvatarBundle;
-use super::folders::CONFIG_DIR;
+use super::folders::config_file;
 use super::AvatarParameters;
 
 const FILE_NAME: &str = "extGogo.json";
@@ -38,7 +38,7 @@ pub struct ExtGogo {
 
 impl ExtGogo {
     pub fn new() -> ExtGogo {
-        let path = format!("{}/{}", CONFIG_DIR.as_ref(), FILE_NAME);
+        let path = config_file(FILE_NAME, Some(FILE_NAME));
 
         let mut me = File::open(&path)
             .ok()
@@ -52,7 +52,7 @@ impl ExtGogo {
     }
 
     fn save(&mut self) {
-        log::info!("Saving ExtGogo to {}", &self.path);
+        log::info!("Saving ExtGogo to {}", self.path);
         File::create(&self.path)
             .ok()
             .and_then(|file| serde_json::to_writer(file, self).ok());
@@ -107,7 +107,10 @@ impl ExtGogo {
                 OscType::Bool(false)
             };
 
-            if parameters.get(LOCO_PARAM) != Some(&want_loco) {
+            if parameters
+                .get(LOCO_PARAM)
+                .is_some_and(|current| *current != want_loco)
+            {
                 bundle.send_parameter(LOCO_PARAM, want_loco);
             }
         }

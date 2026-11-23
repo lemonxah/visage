@@ -1,1 +1,5 @@
 /target
+/captures/qpro-calibration/
+/models/qpro-companion-v3.0.3/*.pt
+/models/qpro-companion-v3.0.3/*.onnx.tmp
+/models/qpro-companion-v3.0.3/train_tongue_model.py

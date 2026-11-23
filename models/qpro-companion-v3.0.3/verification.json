@@ -1,0 +1,23 @@
+{
+  "reference": "Official v3.0.3 PyTorch architecture and weights, OpenCV INTER_AREA preprocessing",
+  "input": "Synthetic grayscale 400x800 stereo strips",
+  "maximumAllowedAbsoluteError": 0.002,
+  "cases": [
+    {
+      "pattern": "flat",
+      "gateMaxAbsoluteError": 1e-07,
+      "directionMaxAbsoluteError": 2e-07
+    },
+    {
+      "pattern": "gradient",
+      "gateMaxAbsoluteError": 1e-07,
+      "directionMaxAbsoluteError": 2e-07
+    },
+    {
+      "pattern": "random",
+      "gateMaxAbsoluteError": 1e-07,
+      "directionMaxAbsoluteError": 2e-07
+    }
+  ],
+  "liveWearerAccuracyTested": false
+}

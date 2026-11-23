@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=Visage
+GenericName=VR Face Tracking
+Comment=Linux eye, face and tongue tracking for VRChat and Resonite
+Exec="@BIN@" --gui openxr --independent-eyes --launch-wivrn --tongue-model "@DATA@/models/@MODEL@/qpro-stereo-tongue-v15-gate.onnx" --tongue-direction-model "@DATA@/models/@MODEL@/qpro-stereo-tongue-v15-direction.onnx" --tongue-threshold @THRESHOLD@ --tongue-relay-script "@DATA@/headset-stream.sh" --tongue-relay-autostart
+TryExec=@BIN@
+Icon=visage
+Terminal=false
+StartupNotify=true
+StartupWMClass=visage
+Categories=Game;
+Keywords=VR;VRChat;OSC;WiVRn;Quest;face;eye;tongue;tracking;

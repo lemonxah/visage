@@ -28,7 +28,7 @@ impl Watchdog {
     }
 
     pub fn run(&self) {
-        let sleep_duration = std::time::Duration::from_secs(1);
+        let sleep_duration = std::time::Duration::from_millis(200);
         let self_drive = self.self_drive.clone();
         let last_received = self.last_received.clone();
         let start = self.start;
@@ -37,7 +37,7 @@ impl Watchdog {
             let last_recv_time = last_received.load(std::sync::atomic::Ordering::Relaxed);
 
             let elapsed = start.elapsed().as_millis() as u64;
-            if elapsed - last_recv_time > 500 {
+            if elapsed.saturating_sub(last_recv_time) > 500 {
                 self_drive.store(true, Ordering::Relaxed);
             }
             thread::sleep(sleep_duration);

@@ -1,5 +1,82 @@
-use super::unified::{UnifiedExpressions, UnifiedShapeAccessors, UnifiedShapes, NUM_ALL_SHAPES};
-use openxr as xr;
+use super::unified::{UnifiedExpressions, UnifiedShapeAccessors, UnifiedShapes, NUM_SHAPES};
+
+mod xr {
+    pub mod sys {
+        pub const FACIAL_EXPRESSION_EYE_COUNT_HTC: usize = 14;
+        pub const FACIAL_EXPRESSION_LIP_COUNT_HTC: usize = 37;
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct EyeExpressionHTC(i32);
+
+    impl EyeExpressionHTC {
+        pub const LEFT_BLINK: Self = Self(0);
+        pub const LEFT_WIDE: Self = Self(1);
+        pub const RIGHT_BLINK: Self = Self(2);
+        pub const RIGHT_WIDE: Self = Self(3);
+        pub const LEFT_SQUEEZE: Self = Self(4);
+        pub const RIGHT_SQUEEZE: Self = Self(5);
+        pub const LEFT_DOWN: Self = Self(6);
+        pub const RIGHT_DOWN: Self = Self(7);
+        pub const LEFT_OUT: Self = Self(8);
+        pub const RIGHT_IN: Self = Self(9);
+        pub const LEFT_IN: Self = Self(10);
+        pub const RIGHT_OUT: Self = Self(11);
+        pub const LEFT_UP: Self = Self(12);
+        pub const RIGHT_UP: Self = Self(13);
+
+        pub const fn into_raw(self) -> i32 {
+            self.0
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct LipExpressionHTC(i32);
+
+    impl LipExpressionHTC {
+        pub const JAW_RIGHT: Self = Self(0);
+        pub const JAW_LEFT: Self = Self(1);
+        pub const JAW_FORWARD: Self = Self(2);
+        pub const JAW_OPEN: Self = Self(3);
+        pub const MOUTH_APE_SHAPE: Self = Self(4);
+        pub const MOUTH_UPPER_RIGHT: Self = Self(5);
+        pub const MOUTH_UPPER_LEFT: Self = Self(6);
+        pub const MOUTH_LOWER_RIGHT: Self = Self(7);
+        pub const MOUTH_LOWER_LEFT: Self = Self(8);
+        pub const MOUTH_UPPER_OVERTURN: Self = Self(9);
+        pub const MOUTH_LOWER_OVERTURN: Self = Self(10);
+        pub const MOUTH_POUT: Self = Self(11);
+        pub const MOUTH_SMILE_RIGHT: Self = Self(12);
+        pub const MOUTH_SMILE_LEFT: Self = Self(13);
+        pub const MOUTH_SAD_RIGHT: Self = Self(14);
+        pub const MOUTH_SAD_LEFT: Self = Self(15);
+        pub const CHEEK_PUFF_RIGHT: Self = Self(16);
+        pub const CHEEK_PUFF_LEFT: Self = Self(17);
+        pub const CHEEK_SUCK: Self = Self(18);
+        pub const MOUTH_UPPER_UPRIGHT: Self = Self(19);
+        pub const MOUTH_UPPER_UPLEFT: Self = Self(20);
+        pub const MOUTH_LOWER_DOWNRIGHT: Self = Self(21);
+        pub const MOUTH_LOWER_DOWNLEFT: Self = Self(22);
+        pub const MOUTH_UPPER_INSIDE: Self = Self(23);
+        pub const MOUTH_LOWER_INSIDE: Self = Self(24);
+        pub const MOUTH_LOWER_OVERLAY: Self = Self(25);
+        pub const TONGUE_LONGSTEP1: Self = Self(26);
+        pub const TONGUE_LEFT: Self = Self(27);
+        pub const TONGUE_RIGHT: Self = Self(28);
+        pub const TONGUE_UP: Self = Self(29);
+        pub const TONGUE_DOWN: Self = Self(30);
+        pub const TONGUE_ROLL: Self = Self(31);
+        pub const TONGUE_LONGSTEP2: Self = Self(32);
+        pub const TONGUE_UPRIGHT_MORPH: Self = Self(33);
+        pub const TONGUE_UPLEFT_MORPH: Self = Self(34);
+        pub const TONGUE_DOWNRIGHT_MORPH: Self = Self(35);
+        pub const TONGUE_DOWNLEFT_MORPH: Self = Self(36);
+
+        pub const fn into_raw(self) -> i32 {
+            self.0
+        }
+    }
+}
 
 pub(crate) struct HtcFacialData {
     pub(super) eye: Option<[f32; xr::sys::FACIAL_EXPRESSION_EYE_COUNT_HTC]>,
@@ -7,6 +84,17 @@ pub(crate) struct HtcFacialData {
 }
 
 impl HtcFacialData {
+    pub(crate) fn from_slices(eye: Option<&[f32]>, lip: Option<&[f32]>) -> Option<Self> {
+        fn take<const N: usize>(values: Option<&[f32]>) -> Option<[f32; N]> {
+            let mut arr: [f32; N] = values?.get(..N)?.try_into().ok()?;
+            arr.iter_mut().for_each(|v| *v = super::arkit::sanitize(*v));
+            Some(arr)
+        }
+        let eye = take(eye);
+        let lip = take(lip);
+        (eye.is_some() || lip.is_some()).then_some(Self { eye, lip })
+    }
+
     #[inline(always)]
     fn eyef(&self, idx: xr::EyeExpressionHTC) -> f32 {
         self.eye
@@ -23,7 +111,7 @@ impl HtcFacialData {
 }
 
 pub(crate) fn htc_to_unified(d: &HtcFacialData) -> UnifiedShapes {
-    let mut shapes: UnifiedShapes = [0.0; NUM_ALL_SHAPES];
+    let mut shapes: UnifiedShapes = [0.0; NUM_SHAPES];
 
     shapes.setu(
         UnifiedExpressions::EyeRightX,
@@ -259,4 +347,58 @@ pub(crate) fn htc_to_unified(d: &HtcFacialData) -> UnifiedShapes {
     */
 
     shapes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(feature = "openxr")]
+    #[test]
+    fn local_htc_indices_match_openxr() {
+        use openxr as oxr;
+        assert_eq!(
+            xr::sys::FACIAL_EXPRESSION_EYE_COUNT_HTC,
+            oxr::sys::FACIAL_EXPRESSION_EYE_COUNT_HTC
+        );
+        assert_eq!(
+            xr::sys::FACIAL_EXPRESSION_LIP_COUNT_HTC,
+            oxr::sys::FACIAL_EXPRESSION_LIP_COUNT_HTC
+        );
+        assert_eq!(
+            xr::EyeExpressionHTC::RIGHT_UP.into_raw(),
+            oxr::EyeExpressionHTC::RIGHT_UP.into_raw()
+        );
+        assert_eq!(
+            xr::EyeExpressionHTC::LEFT_IN.into_raw(),
+            oxr::EyeExpressionHTC::LEFT_IN.into_raw()
+        );
+        assert_eq!(
+            xr::LipExpressionHTC::MOUTH_LOWER_INSIDE.into_raw(),
+            oxr::LipExpressionHTC::MOUTH_LOWER_INSIDE.into_raw()
+        );
+        assert_eq!(
+            xr::LipExpressionHTC::TONGUE_DOWNLEFT_MORPH.into_raw(),
+            oxr::LipExpressionHTC::TONGUE_DOWNLEFT_MORPH.into_raw()
+        );
+    }
+
+    #[test]
+    fn from_slices_requires_full_arrays_and_sanitizes() {
+        assert!(HtcFacialData::from_slices(None, None).is_none());
+        assert!(HtcFacialData::from_slices(Some(&[0.0; 13]), Some(&[0.0; 36])).is_none());
+        let mut lip = vec![0.0; 37];
+        lip[xr::LipExpressionHTC::JAW_OPEN.into_raw() as usize] = 2.0;
+        let data = HtcFacialData::from_slices(Some(&[0.0; 10]), Some(&lip)).unwrap();
+        assert!(data.eye.is_none());
+        let shapes = htc_to_unified(&data);
+        assert_eq!(shapes.getu(UnifiedExpressions::JawOpen), 1.0);
+        let mut eye = vec![0.0; 14];
+        eye[0] = f32::NAN;
+        eye[2] = 0.5;
+        let data = HtcFacialData::from_slices(Some(&eye), None).unwrap();
+        let shapes = htc_to_unified(&data);
+        assert_eq!(shapes.getu(UnifiedExpressions::EyeClosedLeft), 0.0);
+        assert_eq!(shapes.getu(UnifiedExpressions::EyeClosedRight), 0.5);
+    }
 }

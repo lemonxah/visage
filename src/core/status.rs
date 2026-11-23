@@ -1,4 +1,8 @@
-use std::{collections::VecDeque, sync::Arc, time::Instant};
+use std::{
+    collections::VecDeque,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
@@ -10,8 +14,11 @@ pub struct StatusBar {
     fps_counter: VecDeque<Instant>,
     fps: f32,
     start: Instant,
+    last_display: Option<Instant>,
     pub last_frame_time: f32,
 }
+
+const DISPLAY_INTERVAL: Duration = Duration::from_millis(100);
 
 impl StatusBar {
     pub fn new(multi: &MultiProgress) -> Self {
@@ -27,6 +34,7 @@ impl StatusBar {
             recv_counter: VecDeque::new(),
             fps_counter: VecDeque::new(),
             start: Instant::now(),
+            last_display: None,
             last_frame_time: 0f32,
             fps: 1f32,
         }
@@ -46,13 +54,7 @@ impl StatusBar {
             }
         }
 
-        let total_elapsed = self
-            .fps_counter
-            .front()
-            .map(|time| time.elapsed().as_secs_f32())
-            .unwrap_or(0f32);
-
-        self.fps = self.fps_counter.len() as f32 / total_elapsed;
+        self.fps = self.fps_counter.len() as f32;
         self.add_item(format!("TICK:{:.0}/s", self.fps).into());
     }
 
@@ -68,19 +70,14 @@ impl StatusBar {
     }
 
     pub fn recv_summary(&mut self) {
-        let total_elapsed = self
-            .recv_counter
-            .front()
-            .map(|time| time.elapsed().as_secs_f32())
-            .unwrap_or(0f32);
-
-        self.add_item(
-            format!(
-                "RECV:{:.0}/s",
-                self.recv_counter.len() as f32 / total_elapsed
-            )
-            .into(),
-        );
+        while let Some(time) = self.recv_counter.front() {
+            if time.elapsed().as_secs_f32() > 1. {
+                self.recv_counter.pop_front();
+            } else {
+                break;
+            }
+        }
+        self.add_item(format!("RECV:{}/s", self.recv_counter.len()).into());
     }
 
     pub fn set_sent_count(&mut self, count: f32) {
@@ -94,20 +91,13 @@ impl StatusBar {
             }
         }
 
-        let total_elapsed = self
-            .send_counter
-            .front()
-            .map(|(_, time)| time.elapsed().as_secs_f32())
-            .unwrap_or(0f32);
-
         let total = self
             .send_counter
             .iter()
             .map(|(count, _)| count)
-            .sum::<f32>()
-            / total_elapsed;
+            .sum::<f32>();
 
-        self.add_item(format!("SEND:{:.1}/s", total).into());
+        self.add_item(format!("SEND:{:.0}/s", total).into());
     }
 
     pub fn add_item(&mut self, str: Arc<str>) {
@@ -115,8 +105,23 @@ impl StatusBar {
     }
 
     pub fn display(&mut self) {
+        if self
+            .last_display
+            .is_some_and(|at| at.elapsed() < DISPLAY_INTERVAL)
+        {
+            self.messages.clear();
+            return;
+        }
+        self.last_display = Some(Instant::now());
         let uptime = self.start.elapsed().as_secs();
         if uptime >= 1 {
+            if super::live::LIVE.enabled() {
+                super::live::LIVE
+                    .snapshot
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .status = self.messages.clone();
+            }
             let str = self.messages.join("  ");
             self.spinner.set_message(str);
         } else {
