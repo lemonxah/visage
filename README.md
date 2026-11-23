@@ -191,10 +191,6 @@ with a warning. Closing the window stops Visage.
   window enabled, `start.sh` no longer stops when the headset is missing or not
   rooted at launch; it warns and leaves the relay to this button. The relay is
   stopped on exit, including Ctrl+C, `SIGTERM` and logout.
-- **Preview**: a live 3D head driven by the same unified expressions that are
-  sent to the game, so tracking and pinned shapes can be checked without
-  VRChat or Resonite running. Drag to orbit, scroll to zoom, double-click to
-  reset.
 - **Log**: the last 1000 log lines with level and text filters. Long lines are
   truncated, so the log never grows without bound.
 

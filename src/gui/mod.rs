@@ -19,7 +19,6 @@ mod assets;
 #[cfg(feature = "cameras")]
 mod cameras;
 mod face;
-mod face3d;
 #[cfg(feature = "qpro-tongue")]
 mod tongue;
 mod widgets;
@@ -32,14 +31,12 @@ enum Tab {
     Face,
     Mouth,
     Cameras,
-    Preview,
     Log,
 }
 
 struct App {
     tab: Tab,
     face: face::FaceView,
-    face3d: face3d::Face3d,
     #[cfg(feature = "cameras")]
     cameras: cameras::CamerasView,
     #[cfg(feature = "qpro-tongue")]
@@ -78,7 +75,6 @@ impl App {
         Self {
             tab: Tab::Face,
             face: face::FaceView::new(),
-            face3d: face3d::Face3d::new(),
             #[cfg(feature = "cameras")]
             cameras: cameras::CamerasView::new(),
             #[cfg(feature = "qpro-tongue")]
@@ -253,7 +249,6 @@ impl eframe::App for App {
                 }
                 #[cfg(not(feature = "cameras"))]
                 Tab::Cameras => {}
-                Tab::Preview => self.face3d.ui(ui, &snapshot.shapes, snapshot.eyes),
                 Tab::Log => self.log_ui(ui),
             });
 
@@ -280,7 +275,6 @@ fn tabs(ui: &mut Ui, tab: &mut Tab) {
                 tab_button(ui, tab, Tab::Mouth, &glyphs().tongue, "Mouth");
                 #[cfg(feature = "cameras")]
                 tab_button(ui, tab, Tab::Cameras, &glyphs().camera, "Cameras");
-                tab_button(ui, tab, Tab::Preview, &glyphs().headset, "Preview");
                 tab_button(ui, tab, Tab::Log, &glyphs().log, "Log");
             });
         });

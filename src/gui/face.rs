@@ -163,7 +163,7 @@ impl FaceView {
             });
             ui.label(
                 RichText::new(
-                    "Pin a shape to hold it at a fixed value regardless of tracking, then drag its bar. Useful for testing avatar blendshapes and the Preview tab.",
+                    "Pin a shape to hold it at a fixed value regardless of tracking, then drag its bar. Useful for testing avatar blendshapes.",
                 )
                 .small()
                 .weak(),
