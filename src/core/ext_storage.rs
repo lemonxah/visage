@@ -2,7 +2,7 @@ use std::{fs::File, time::Instant};
 
 use rosc::{OscBundle, OscType};
 
-use super::{bundle::AvatarBundle, folders::CONFIG_DIR};
+use super::{bundle::AvatarBundle, folders::config_file};
 
 const FILE_NAME: &str = "extMem.json";
 const LENGTH: usize = 255;
@@ -19,13 +19,13 @@ pub struct ExtStorage {
 
 impl ExtStorage {
     pub fn new() -> ExtStorage {
-        let path = format!("{}/{}", CONFIG_DIR.as_ref(), FILE_NAME);
+        let path = config_file(FILE_NAME, Some(FILE_NAME));
 
-        let data: Vec<f32> = File::open(&path)
+        let mut data: Vec<f32> = File::open(&path)
             .ok()
             .and_then(|file| serde_json::from_reader(file).ok())
-            .unwrap_or_else(|| Some(vec![-1.; LENGTH]))
-            .unwrap();
+            .unwrap_or_default();
+        data.resize(LENGTH, -1.);
 
         ExtStorage {
             path,
@@ -40,7 +40,7 @@ impl ExtStorage {
 
     fn save(&mut self) {
         self.last_save = Instant::now();
-        log::info!("Saving ExtStorage to {}", &self.path);
+        log::info!("Saving ExtStorage to {}", self.path);
         File::create(&self.path)
             .ok()
             .and_then(|file| serde_json::to_writer(file, &self.data).ok());
@@ -49,13 +49,16 @@ impl ExtStorage {
     pub fn notify(&mut self, name: &str, value: &OscType) {
         match (name, value) {
             ("ExtIndex", OscType::Int(index)) => {
-                self.ext_index = *index as _;
+                self.ext_index = usize::try_from(*index)
+                    .ok()
+                    .filter(|i| *i < LENGTH)
+                    .unwrap_or(0);
                 if self.ext_value > f32::EPSILON {
                     self.data[self.ext_index] = self.ext_value;
                     self.int_index = 0;
                 }
             }
-            ("ExtValue", OscType::Float(value)) => {
+            ("ExtValue", OscType::Float(value)) if value.is_finite() => {
                 self.ext_value = *value;
                 if self.ext_index > 0 {
                     self.data[self.ext_index] = self.ext_value;
@@ -98,8 +101,8 @@ impl ExtStorage {
             return;
         }
 
+        self.last_tick = Instant::now();
         if let Some(value) = self.next() {
-            self.last_tick = Instant::now();
             log::trace!("Sending {} {}", self.int_index, value);
 
             bundle.send_parameter("IntIndex", OscType::Int(self.int_index as _));

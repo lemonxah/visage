@@ -23,9 +23,9 @@ use std::{
     time::Duration,
 };
 
-const SERVICE_NAME: &str = "OscAvMgr";
-const OSC_HOSTNAME: &str = "OscAvMgr.osc.local.";
-const OSCQUERY_HOSTNAME: &str = "OscAvMgr.oscjson.local.";
+const SERVICE_NAME: &str = "Visage";
+const OSC_HOSTNAME: &str = "Visage.osc.local.";
+const OSCQUERY_HOSTNAME: &str = "Visage.oscjson.local.";
 const OSC_SERVICE: &str = "_osc._udp.local.";
 const OSCQUERY_SERVICE: &str = "_oscjson._tcp.local.";
 const FIRST_HTTP_PORT: u16 = 9402;

@@ -19,10 +19,13 @@ pub use self::openxr::OpenXrArgs;
 #[cfg(feature = "openxr")]
 use self::openxr::OpenXrReceiver;
 
+pub use self::phone::PhoneArgs;
+
 use self::unified::{CombinedExpression, UnifiedExpressions, UnifiedTrackingData, NUM_SHAPES};
 
 use super::{
     ext_oscjson::{MysteryParam, OscJsonNode},
+    live::LIVE,
     AppState,
 };
 
@@ -31,19 +34,36 @@ use strum::IntoEnumIterator;
 
 #[cfg(feature = "alvr")]
 mod alvr;
+#[cfg(feature = "openxr")]
+mod android_face;
+mod arkit;
 #[cfg(feature = "babble")]
 mod babble;
+#[cfg(feature = "cameras")]
+pub mod camera;
 mod face2_fb;
-#[cfg(feature = "openxr")]
+#[cfg(any(feature = "openxr", feature = "alvr"))]
 mod htc;
 #[cfg(feature = "openxr")]
 mod openxr;
+mod phone;
 #[cfg(feature = "qpro-tongue")]
-mod qpro_tongue;
+pub mod qpro_tongue;
 mod sranipal;
+mod steamlink;
 pub mod unified;
 #[cfg(feature = "openxr")]
 mod vergence;
+
+#[cfg(any(feature = "cameras", feature = "qpro-tongue"))]
+pub(crate) fn onnx_environment() -> anyhow::Result<ort::environment::Environment> {
+    static ENVIRONMENT: once_cell::sync::OnceCell<ort::environment::Environment> =
+        once_cell::sync::OnceCell::new();
+    ENVIRONMENT
+        .get_or_try_init(|| ort::init().with_name("visage").build())
+        .cloned()
+        .map_err(|e| anyhow::anyhow!("ONNX Runtime: {e}"))
+}
 
 trait FaceReceiver {
     fn start_loop(&mut self);
@@ -129,6 +149,8 @@ impl ExtTracking {
             params[e as usize] = Some(new);
         }
 
+        #[cfg(feature = "cameras")]
+        let camera_args = camera::CameraArgs::from_setup(&setup);
         let receiver: Box<dyn FaceReceiver> = match setup {
             FaceSetup::Dummy => Box::new(DummyReceiver {}),
             #[cfg(feature = "alvr")]
@@ -145,8 +167,12 @@ impl ExtTracking {
                 receiver
             }
             #[cfg(feature = "babble")]
-            FaceSetup::Babble { listen } => Box::new(BabbleEtvrReceiver::new(listen)),
+            FaceSetup::Babble { listen, .. } => Box::new(BabbleEtvrReceiver::new(listen)),
+            FaceSetup::Phone(args) => Box::new(phone::PhoneReceiver::new(args)),
+            FaceSetup::Steamlink { listen } => Box::new(steamlink::SteamLinkReceiver::new(listen)),
         };
+        #[cfg(feature = "cameras")]
+        let receiver = camera::wrap(receiver, camera_args);
 
         let mut me = Self {
             data: UnifiedTrackingData::default(),
@@ -170,12 +196,34 @@ impl ExtTracking {
         let afk = matches!(state.params.get("AFK"), Some(OscType::Bool(true)))
             || matches!(state.params.get("IsAfk"), Some(OscType::Bool(true)));
 
+        let live = LIVE.enabled();
+        let overrides = live.then(|| {
+            let mut controls = LIVE.controls.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(mode) = controls.ft_mode.take() {
+                if mode != self.ft_mode {
+                    log::info!("Face tracking mode: {:?}", mode);
+                    self.ft_mode = mode;
+                }
+            }
+            controls.overrides
+        });
+
         if afk {
             log::debug!("AFK");
         } else if motion ^ face_override {
             log::debug!("Freeze");
         } else {
             self.receiver.receive(&mut self.data, state);
+            if let Some(overrides) = overrides.as_ref() {
+                for (shape, value) in self.data.shapes[..UnifiedExpressions::COUNT]
+                    .iter_mut()
+                    .zip(overrides)
+                {
+                    if let Some(value) = value {
+                        *shape = *value;
+                    }
+                }
+            }
             self.data.calc_combined(state);
         }
 
@@ -190,6 +238,16 @@ impl ExtTracking {
             FtMode::Native => (true, false),
             FtMode::Both => (true, true),
         };
+
+        if live {
+            let mut snapshot = LIVE.snapshot.lock().unwrap_or_else(|e| e.into_inner());
+            snapshot.shapes = self.data.shapes;
+            snapshot.eyes = self.data.eyes;
+            snapshot.ft_mode = self.ft_mode;
+            snapshot.sending_native = native;
+            snapshot.sending_legacy = legacy;
+            snapshot.avatar_native_ft = state.avatar_native_ft;
+        }
 
         state.status.add_item(match (native, legacy) {
             (true, true) => STA_BOTH.clone(),
@@ -226,7 +284,7 @@ impl ExtTracking {
 
     fn process_node_recursive(&mut self, name: &str, node: &OscJsonNode) -> Option<()> {
         static FT_PARAMS_REGEX: Lazy<Regex> =
-            Lazy::new(|| Regex::new(r"^(.+?)(Negative|\d+)?$").unwrap());
+            Lazy::new(|| Regex::new(r"^(.+?)(Negative|[0-9]+)?$").unwrap());
 
         if self.should_ignore_path(node) {
             return None;
@@ -284,8 +342,16 @@ impl ExtTracking {
                     stored.neg_address = Some(addr.into());
                 }
                 Some(digit) => {
-                    let digit = digit.parse::<f32>().unwrap();
-                    let idx = digit.log2() as usize;
+                    let Some(idx) = digit
+                        .parse::<u32>()
+                        .ok()
+                        .filter(|d| d.is_power_of_two())
+                        .map(|d| d.trailing_zeros() as usize)
+                        .filter(|i| *i < stored.addresses.len())
+                    else {
+                        log::debug!("Ignoring unsupported binary parameter {}", node.full_path);
+                        return None;
+                    };
                     let addr = &node.full_path.as_ref()[super::PARAM_PREFIX.len()..];
                     stored.num_bits = stored.num_bits.max(idx + 1);
                     stored.addresses[idx] = Some(addr.into());

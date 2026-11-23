@@ -12,7 +12,7 @@ fi
 
 command -v python3 >/dev/null || { echo "python3 is required." >&2; exit 1; }
 [[ -f "$HEADSET_STREAM_SCRIPT" ]] || { echo "Missing $HEADSET_STREAM_SCRIPT" >&2; exit 1; }
-echo "Close OscAvMgr and other camera viewers before capture. Keep WiVRn face tracking enabled."
+echo "Close Visage and other camera viewers before capture. Keep WiVRn face tracking enabled."
 
 cleanup() {
     trap - EXIT INT TERM

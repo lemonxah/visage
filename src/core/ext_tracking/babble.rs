@@ -2,6 +2,7 @@ use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket},
     sync::{
+        atomic::{AtomicBool, Ordering},
         mpsc::{sync_channel, Receiver, SyncSender},
         Arc,
     },
@@ -37,6 +38,13 @@ pub(super) struct BabbleEtvrReceiver {
     last_received_babble: Instant,
     last_received_etvr: Instant,
     mouth_values: [Option<(f32, Instant)>; NUM_SHAPES],
+    stop: Arc<AtomicBool>,
+}
+
+impl Drop for BabbleEtvrReceiver {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
 }
 
 impl BabbleEtvrReceiver {
@@ -49,6 +57,7 @@ impl BabbleEtvrReceiver {
             last_received_babble: Instant::now(),
             last_received_etvr: Instant::now(),
             mouth_values: [None; NUM_SHAPES],
+            stop: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -61,7 +70,8 @@ impl BabbleEtvrReceiver {
         log::info!("BABBLE turns green when mouth data arrives; stale values fall back to OpenXR after one second.");
         let sender = self.sender.clone();
         let port = self.listen_port;
-        thread::spawn(move || babble_loop(port, sender));
+        let stop = self.stop.clone();
+        thread::spawn(move || babble_loop(port, sender, stop));
     }
 
     fn apply_mouth(&mut self, data: &mut UnifiedTrackingData) -> bool {
@@ -102,54 +112,19 @@ impl FaceReceiver for BabbleEtvrReceiver {
         let sender = self.sender.clone();
         let listen_port = self.listen_port;
 
-        let babble_recv_port = listen_port + 10;
-        let babble_http_port = babble_recv_port + 1;
-        let etvr_recv_port = babble_recv_port + 10;
-        let etvr_http_port = etvr_recv_port + 1;
-
         log::info!("{}", *INSTRUCTIONS_START);
         log::info!("");
         log::info!("Selected ProjectBabble + EyeTrackVR to provide face data.");
         log::info!("(You don't have to have both!)");
         log::info!("");
-        log::info!("For Babble:");
         log::info!(
-            "• Set {} to {}",
-            "Port".color(Color::BrightYellow),
+            "• In Babble/Baballonia and EyeTrackVR, set the {} to {} and the {} to {}",
+            "OSC address".color(Color::BrightYellow),
+            "127.0.0.1".color(Color::Cyan),
+            "OSC port".color(Color::BrightYellow),
             format!("{}", listen_port).color(Color::Cyan),
         );
-        log::info!(
-            "• Set {} to {}",
-            "Receiver Port".color(Color::BrightYellow),
-            format!("{}", babble_recv_port).color(Color::Cyan),
-        );
-        log::info!(
-            "• Start: {}",
-            format!(
-                "./VrcAdvert babble {} {}",
-                babble_http_port, babble_recv_port
-            )
-            .on_color(Color::White)
-            .color(Color::Black)
-        );
-        log::info!("");
-        log::info!("For ETVR:");
-        log::info!(
-            "• Set {} to {}",
-            "OSC Port".color(Color::BrightYellow),
-            format!("{}", listen_port).color(Color::Cyan),
-        );
-        log::info!(
-            "• Set {} to {}",
-            "OSC Receiver Port".color(Color::BrightYellow),
-            format!("{}", etvr_recv_port).color(Color::Cyan),
-        );
-        log::info!(
-            "• Start: {}",
-            format!("./VrcAdvert etvr {} {}", etvr_http_port, etvr_recv_port)
-                .on_color(Color::White)
-                .color(Color::Black)
-        );
+        log::info!("• Leave the OSC prefix/location empty");
         log::info!("");
         log::info!("Status bar tickers:");
         log::info!("• {} → mouth data is being received", *STA_BABL1);
@@ -164,7 +139,8 @@ impl FaceReceiver for BabbleEtvrReceiver {
         log::info!("");
         log::info!("{}", *INSTRUCTIONS_END);
 
-        thread::spawn(move || babble_loop(listen_port, sender));
+        let stop = self.stop.clone();
+        thread::spawn(move || babble_loop(listen_port, sender, stop));
     }
 
     fn receive(&mut self, data: &mut UnifiedTrackingData, state: &mut AppState) {
@@ -192,12 +168,20 @@ impl FaceReceiver for BabbleEtvrReceiver {
     }
 }
 
-fn babble_loop(listen_port: u16, mut sender: SyncSender<Box<BabbleEtvrEvent>>) {
-    loop {
-        if let Some(()) = receive_babble_osc(listen_port, &mut sender) {
+fn babble_loop(
+    listen_port: u16,
+    mut sender: SyncSender<Box<BabbleEtvrEvent>>,
+    stop: Arc<AtomicBool>,
+) {
+    while !stop.load(Ordering::Relaxed) {
+        if let Some(()) = receive_babble_osc(listen_port, &mut sender, &stop) {
             break;
-        } else {
-            thread::sleep(Duration::from_millis(5000));
+        }
+        for _ in 0..50 {
+            if stop.load(Ordering::Relaxed) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(100));
         }
     }
 }
@@ -205,44 +189,60 @@ fn babble_loop(listen_port: u16, mut sender: SyncSender<Box<BabbleEtvrEvent>>) {
 fn receive_babble_osc(
     listen_port: u16,
     sender: &mut SyncSender<Box<BabbleEtvrEvent>>,
+    stop: &AtomicBool,
 ) -> Option<()> {
     let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
-    let listener = UdpSocket::bind(SocketAddr::new(ip, listen_port)).expect("bind listener socket");
+    let listener = match UdpSocket::bind(SocketAddr::new(ip, listen_port)) {
+        Ok(listener) => listener,
+        Err(e) => {
+            log::error!("Babble/ETVR: cannot listen on port {listen_port}: {e}. Retrying in 5s.");
+            return None;
+        }
+    };
+    let _ = listener.set_read_timeout(Some(Duration::from_secs(1)));
     let mut buf = [0u8; 65535];
     loop {
+        if stop.load(Ordering::Relaxed) {
+            return Some(());
+        }
         if let Ok((size, _addr)) = listener.recv_from(&mut buf) {
             if let Ok((_, packet)) = rosc::decoder::decode_udp(&buf[..size]) {
-                queue_packet(packet, sender);
+                if !queue_packet(packet, sender) {
+                    return Some(());
+                }
             }
         }
     }
 }
 
-fn queue_packet(packet: OscPacket, sender: &SyncSender<Box<BabbleEtvrEvent>>) {
+fn queue_packet(packet: OscPacket, sender: &SyncSender<Box<BabbleEtvrEvent>>) -> bool {
     let packet = match packet {
         OscPacket::Bundle(bundle) => {
             for packet in bundle.content {
-                queue_packet(packet, sender);
+                if !queue_packet(packet, sender) {
+                    return false;
+                }
             }
-            return;
+            return true;
         }
         OscPacket::Message(packet) => packet,
     };
     let Some(OscType::Float(value)) = packet.args.first() else {
-        return;
+        return true;
     };
     if !value.is_finite() {
-        return;
+        return true;
     }
     if let Some(mappings) = ADDR_TO_UNIFIED.get(packet.addr.as_str()) {
         for mapping in mappings {
             let value = mapping.value_mapper.map_or(*value, |mapper| mapper(*value));
             let event = Box::new(BabbleEtvrEvent::new(mapping.expression, value));
-            if let Err(error) = sender.try_send(event) {
-                log::warn!("Failed to send Babble/ETVR message: {error}");
+            if let Err(std::sync::mpsc::TrySendError::Disconnected(_)) = sender.try_send(event) {
+                return false;
             }
         }
     }
+    true
 }
 
 struct BabbleEtvrEvent {
@@ -257,7 +257,7 @@ impl BabbleEtvrEvent {
 }
 
 #[derive(Debug, Clone)]
-struct ExpressionMapping {
+pub(super) struct ExpressionMapping {
     pub expression: UnifiedExpressions,
     pub value_mapper: Option<fn(f32) -> f32>,
 }
@@ -265,6 +265,85 @@ struct ExpressionMapping {
 fn mapper_invert_normalized(x: f32) -> f32 {
     1.0 - x
 }
+
+#[rustfmt::skip]
+pub(super) static ADDR_TO_UNIFIED: Lazy<HashMap<&'static str, Vec<ExpressionMapping>>> = Lazy::new(|| {
+    [
+        // ProjectBabble
+        ("/cheekPuffLeft", vec![ExpressionMapping{expression: UnifiedExpressions::CheekPuffLeft, value_mapper: None}]),
+        ("/cheekPuffRight", vec![ExpressionMapping{expression: UnifiedExpressions::CheekPuffRight, value_mapper: None}]),
+        ("/cheekSuckLeft", vec![ExpressionMapping{expression: UnifiedExpressions::CheekSuckLeft, value_mapper: None}]),
+        ("/cheekSuckRight", vec![ExpressionMapping{expression: UnifiedExpressions::CheekSuckRight, value_mapper: None}]),
+        ("/jawOpen", vec![ExpressionMapping{expression: UnifiedExpressions::JawOpen, value_mapper: None}]),
+        ("/jawForward", vec![ExpressionMapping{expression: UnifiedExpressions::JawForward, value_mapper: None}]),
+        ("/jawLeft", vec![ExpressionMapping{expression: UnifiedExpressions::JawLeft, value_mapper: None}]),
+        ("/jawRight", vec![ExpressionMapping{expression: UnifiedExpressions::JawRight, value_mapper: None}]),
+        ("/noseSneerLeft", vec![ExpressionMapping{expression: UnifiedExpressions::NoseSneerLeft, value_mapper: None}]),
+        ("/noseSneerRight", vec![ExpressionMapping{expression: UnifiedExpressions::NoseSneerRight, value_mapper: None}]),
+        ("/mouthFunnel", vec![ExpressionMapping{expression: UnifiedExpressions::LipFunnelUpperRight, value_mapper: None}, ExpressionMapping{expression: UnifiedExpressions::LipFunnelUpperLeft, value_mapper: None}, ExpressionMapping{expression: UnifiedExpressions::LipFunnelLowerRight, value_mapper: None}, ExpressionMapping{expression: UnifiedExpressions::LipFunnelLowerLeft, value_mapper: None}]),
+        ("/mouthPucker", vec![ExpressionMapping{expression: UnifiedExpressions::LipPuckerUpperRight, value_mapper: None}, ExpressionMapping{expression: UnifiedExpressions::LipPuckerUpperLeft, value_mapper: None}, ExpressionMapping{expression: UnifiedExpressions::LipPuckerLowerRight, value_mapper: None}, ExpressionMapping{expression: UnifiedExpressions::LipPuckerLowerLeft, value_mapper: None}]),
+        ("/mouthLeft", vec![ExpressionMapping{expression: UnifiedExpressions::MouthUpperLeft, value_mapper: None}, ExpressionMapping{expression: UnifiedExpressions::MouthLowerLeft, value_mapper: None}]),
+        ("/mouthRight", vec![ExpressionMapping{expression: UnifiedExpressions::MouthUpperRight, value_mapper: None}, ExpressionMapping{expression: UnifiedExpressions::MouthLowerRight, value_mapper: None}]),
+        ("/mouthRollUpper", vec![ExpressionMapping{expression: UnifiedExpressions::LipSuckUpperLeft, value_mapper: None}, ExpressionMapping{expression: UnifiedExpressions::LipSuckUpperRight, value_mapper: None}]),
+        ("/mouthRollLower", vec![ExpressionMapping{expression: UnifiedExpressions::LipSuckLowerLeft, value_mapper: None}, ExpressionMapping{expression: UnifiedExpressions::LipSuckLowerRight, value_mapper: None}]),
+        ("/mouthShrugUpper", vec![ExpressionMapping{expression: UnifiedExpressions::MouthRaiserUpper, value_mapper: None}]),
+        ("/mouthShrugLower", vec![ExpressionMapping{expression: UnifiedExpressions::MouthRaiserLower, value_mapper: None}]),
+        ("/mouthClose", vec![ExpressionMapping{expression: UnifiedExpressions::MouthClosed, value_mapper: None}]),
+        ("/mouthSmileLeft", vec![ExpressionMapping{expression: UnifiedExpressions::MouthCornerPullLeft, value_mapper: None}, ExpressionMapping{expression: UnifiedExpressions::MouthCornerSlantLeft, value_mapper: None}]),
+        ("/mouthSmileRight", vec![ExpressionMapping{expression: UnifiedExpressions::MouthCornerPullRight, value_mapper: None}, ExpressionMapping{expression: UnifiedExpressions::MouthCornerSlantRight, value_mapper: None}]),
+        ("/mouthFrownLeft", vec![ExpressionMapping{expression: UnifiedExpressions::MouthFrownLeft, value_mapper: None}, ExpressionMapping{expression: UnifiedExpressions::MouthStretchLeft, value_mapper: None}]),
+        ("/mouthFrownRight", vec![ExpressionMapping{expression: UnifiedExpressions::MouthFrownRight, value_mapper: None}, ExpressionMapping{expression: UnifiedExpressions::MouthStretchRight, value_mapper: None}]),
+        ("/mouthDimpleLeft", vec![ExpressionMapping{expression: UnifiedExpressions::MouthDimpleLeft, value_mapper: None}]),
+        ("/mouthDimpleRight", vec![ExpressionMapping{expression: UnifiedExpressions::MouthDimpleRight, value_mapper: None}]),
+        ("/mouthUpperUpLeft", vec![ExpressionMapping{expression: UnifiedExpressions::MouthUpperUpLeft, value_mapper: None}]),
+        ("/mouthUpperUpRight", vec![ExpressionMapping{expression: UnifiedExpressions::MouthUpperUpRight, value_mapper: None}]),
+        ("/mouthLowerDownLeft", vec![ExpressionMapping{expression: UnifiedExpressions::MouthLowerDownLeft, value_mapper: None}]),
+        ("/mouthLowerDownRight", vec![ExpressionMapping{expression: UnifiedExpressions::MouthLowerDownRight, value_mapper: None}]),
+        ("/mouthStretchLeft", vec![ExpressionMapping{expression: UnifiedExpressions::MouthStretchLeft, value_mapper: None}]),
+        ("/mouthStretchRight", vec![ExpressionMapping{expression: UnifiedExpressions::MouthStretchRight, value_mapper: None}]),
+        ("/tongueOut", vec![ExpressionMapping{expression: UnifiedExpressions::TongueOut, value_mapper: None}]),
+        ("/tongueUp", vec![ExpressionMapping{expression: UnifiedExpressions::TongueUp, value_mapper: None}]),
+        ("/tongueDown", vec![ExpressionMapping{expression: UnifiedExpressions::TongueDown, value_mapper: None}]),
+        ("/tongueLeft", vec![ExpressionMapping{expression: UnifiedExpressions::TongueLeft, value_mapper: None}]),
+        ("/tongueRight", vec![ExpressionMapping{expression: UnifiedExpressions::TongueRight, value_mapper: None}]),
+        ("/tongueRoll", vec![ExpressionMapping{expression: UnifiedExpressions::TongueRoll, value_mapper: None}]),
+        ("/tongueBendDown", vec![ExpressionMapping{expression: UnifiedExpressions::TongueBendDown, value_mapper: None}]),
+        ("/tongueCurlUp", vec![ExpressionMapping{expression: UnifiedExpressions::TongueCurlUp, value_mapper: None}]),
+        ("/tongueSquish", vec![ExpressionMapping{expression: UnifiedExpressions::TongueSquish, value_mapper: None}]),
+        ("/tongueFlat", vec![ExpressionMapping{expression: UnifiedExpressions::TongueFlat, value_mapper: None}]),
+        ("/tongueTwistLeft", vec![ExpressionMapping{expression: UnifiedExpressions::TongueTwistLeft, value_mapper: None}]),
+        ("/tongueTwistRight", vec![ExpressionMapping{expression: UnifiedExpressions::TongueTwistRight, value_mapper: None}]),
+        ("/mouthPressLeft", vec![ExpressionMapping{expression: UnifiedExpressions::MouthPressLeft, value_mapper: None}]),
+        ("/mouthPressRight", vec![ExpressionMapping{expression: UnifiedExpressions::MouthPressRight, value_mapper: None}]),
+
+        // ProjectBabble Baballonia Eye Tracking
+        ("/LeftEyeX", vec![ExpressionMapping{expression: UnifiedExpressions::EyeLeftX, value_mapper: None}]),
+        ("/RightEyeX", vec![ExpressionMapping{expression: UnifiedExpressions::EyeRightX, value_mapper: None}]),
+        // TODO: ETVR only has one Y value for both eyes, but Babble has separate ones. 
+        // For now, only the left eye Y value is used for simplicity, 
+        // but maybe in the future we could do some kind of averaging or something to use both?
+        // if there's demand for it.
+        ("/LeftEyeY", vec![ExpressionMapping{expression: UnifiedExpressions::EyeY, value_mapper: None}]),
+        // ("/RightEyeY", vec![MappingData{expression: UnifiedExpressions::EyeY, value_mapper: None}]), 
+        ("/LeftEyeLid", vec![ExpressionMapping{expression: UnifiedExpressions::EyeClosedLeft, value_mapper: Some(mapper_invert_normalized)}]),
+        ("/RightEyeLid", vec![ExpressionMapping{expression: UnifiedExpressions::EyeClosedRight, value_mapper: Some(mapper_invert_normalized)}]),
+
+        // ETVR
+        ("/avatar/parameters/LeftEyeX", vec![ExpressionMapping{expression: UnifiedExpressions::EyeLeftX, value_mapper: None}]),
+        ("/avatar/parameters/RightEyeX", vec![ExpressionMapping{expression: UnifiedExpressions::EyeRightX, value_mapper: None}]),
+        ("/avatar/parameters/EyesY", vec![ExpressionMapping{expression: UnifiedExpressions::EyeY, value_mapper: None}]),
+        ("/avatar/parameters/LeftEyeLid", vec![ExpressionMapping{expression: UnifiedExpressions::EyeClosedLeft, value_mapper: None}]),
+        ("/avatar/parameters/RightEyeLid", vec![ExpressionMapping{expression: UnifiedExpressions::EyeClosedRight, value_mapper: None}]),
+
+        ("/avatar/parameters/v2/EyeLeftX", vec![ExpressionMapping{expression: UnifiedExpressions::EyeLeftX, value_mapper: None}]),
+        ("/avatar/parameters/v2/EyeRightX", vec![ExpressionMapping{expression: UnifiedExpressions::EyeRightX, value_mapper: None}]),
+        ("/avatar/parameters/v2/EyeLeftY", vec![ExpressionMapping{expression: UnifiedExpressions::EyeY, value_mapper: None}]),
+        ("/avatar/parameters/v2/EyeLidLeft", vec![ExpressionMapping{expression: UnifiedExpressions::EyeClosedLeft, value_mapper: None}]),
+        ("/avatar/parameters/v2/EyeLidRight", vec![ExpressionMapping{expression: UnifiedExpressions::EyeClosedRight, value_mapper: None}]),
+    ]
+    .into_iter()
+    .collect()
+});
 
 #[cfg(test)]
 mod tests {
@@ -353,82 +432,3 @@ mod tests {
         assert_eq!(data.getu(UnifiedExpressions::JawOpen), 0.3);
     }
 }
-
-#[rustfmt::skip]
-static ADDR_TO_UNIFIED: Lazy<HashMap<&'static str, Vec<ExpressionMapping>>> = Lazy::new(|| {
-    [
-        // ProjectBabble
-        ("/cheekPuffLeft", vec![ExpressionMapping{expression: UnifiedExpressions::CheekPuffLeft, value_mapper: None}]),
-        ("/cheekPuffRight", vec![ExpressionMapping{expression: UnifiedExpressions::CheekPuffRight, value_mapper: None}]),
-        ("/cheekSuckLeft", vec![ExpressionMapping{expression: UnifiedExpressions::CheekSuckLeft, value_mapper: None}]),
-        ("/cheekSuckRight", vec![ExpressionMapping{expression: UnifiedExpressions::CheekSuckRight, value_mapper: None}]),
-        ("/jawOpen", vec![ExpressionMapping{expression: UnifiedExpressions::JawOpen, value_mapper: None}]),
-        ("/jawForward", vec![ExpressionMapping{expression: UnifiedExpressions::JawForward, value_mapper: None}]),
-        ("/jawLeft", vec![ExpressionMapping{expression: UnifiedExpressions::JawLeft, value_mapper: None}]),
-        ("/jawRight", vec![ExpressionMapping{expression: UnifiedExpressions::JawRight, value_mapper: None}]),
-        ("/noseSneerLeft", vec![ExpressionMapping{expression: UnifiedExpressions::NoseSneerLeft, value_mapper: None}]),
-        ("/noseSneerRight", vec![ExpressionMapping{expression: UnifiedExpressions::NoseSneerRight, value_mapper: None}]),
-        ("/mouthFunnel", vec![ExpressionMapping{expression: UnifiedExpressions::LipFunnelUpperRight, value_mapper: None}, ExpressionMapping{expression: UnifiedExpressions::LipFunnelUpperLeft, value_mapper: None}, ExpressionMapping{expression: UnifiedExpressions::LipFunnelLowerRight, value_mapper: None}, ExpressionMapping{expression: UnifiedExpressions::LipFunnelLowerLeft, value_mapper: None}]),
-        ("/mouthPucker", vec![ExpressionMapping{expression: UnifiedExpressions::LipPuckerUpperRight, value_mapper: None}, ExpressionMapping{expression: UnifiedExpressions::LipPuckerUpperLeft, value_mapper: None}, ExpressionMapping{expression: UnifiedExpressions::LipPuckerLowerRight, value_mapper: None}, ExpressionMapping{expression: UnifiedExpressions::LipPuckerLowerLeft, value_mapper: None}]),
-        ("/mouthLeft", vec![ExpressionMapping{expression: UnifiedExpressions::MouthPressLeft, value_mapper: None}]),
-        ("/mouthRight", vec![ExpressionMapping{expression: UnifiedExpressions::MouthPressRight, value_mapper: None}]),
-        ("/mouthRollUpper", vec![ExpressionMapping{expression: UnifiedExpressions::LipSuckUpperLeft, value_mapper: None}, ExpressionMapping{expression: UnifiedExpressions::LipSuckUpperRight, value_mapper: None}]),
-        ("/mouthRollLower", vec![ExpressionMapping{expression: UnifiedExpressions::LipSuckLowerLeft, value_mapper: None}, ExpressionMapping{expression: UnifiedExpressions::LipSuckLowerRight, value_mapper: None}]),
-        ("/mouthShrugUpper", vec![ExpressionMapping{expression: UnifiedExpressions::MouthRaiserUpper, value_mapper: None}]),
-        ("/mouthShrugLower", vec![ExpressionMapping{expression: UnifiedExpressions::MouthRaiserLower, value_mapper: None}]),
-        ("/mouthClose", vec![ExpressionMapping{expression: UnifiedExpressions::MouthClosed, value_mapper: None}]),
-        ("/mouthSmileLeft", vec![ExpressionMapping{expression: UnifiedExpressions::MouthCornerPullLeft, value_mapper: None}, ExpressionMapping{expression: UnifiedExpressions::MouthCornerSlantLeft, value_mapper: None}]),
-        ("/mouthSmileRight", vec![ExpressionMapping{expression: UnifiedExpressions::MouthCornerPullRight, value_mapper: None}, ExpressionMapping{expression: UnifiedExpressions::MouthCornerSlantRight, value_mapper: None}]),
-        ("/mouthFrownLeft", vec![ExpressionMapping{expression: UnifiedExpressions::MouthFrownLeft, value_mapper: None}, ExpressionMapping{expression: UnifiedExpressions::MouthStretchLeft, value_mapper: None}]),
-        ("/mouthFrownRight", vec![ExpressionMapping{expression: UnifiedExpressions::MouthFrownRight, value_mapper: None}, ExpressionMapping{expression: UnifiedExpressions::MouthStretchRight, value_mapper: None}]),
-        ("/mouthDimpleLeft", vec![ExpressionMapping{expression: UnifiedExpressions::MouthDimpleLeft, value_mapper: None}]),
-        ("/mouthDimpleRight", vec![ExpressionMapping{expression: UnifiedExpressions::MouthDimpleRight, value_mapper: None}]),
-        ("/mouthUpperUpLeft", vec![ExpressionMapping{expression: UnifiedExpressions::MouthUpperUpLeft, value_mapper: None}]),
-        ("/mouthUpperUpRight", vec![ExpressionMapping{expression: UnifiedExpressions::MouthUpperUpRight, value_mapper: None}]),
-        ("/mouthLowerDownLeft", vec![ExpressionMapping{expression: UnifiedExpressions::MouthLowerDownLeft, value_mapper: None}]),
-        ("/mouthLowerDownRight", vec![ExpressionMapping{expression: UnifiedExpressions::MouthLowerDownRight, value_mapper: None}]),
-        ("/mouthStretchLeft", vec![ExpressionMapping{expression: UnifiedExpressions::MouthStretchLeft, value_mapper: None}]),
-        ("/mouthStretchRight", vec![ExpressionMapping{expression: UnifiedExpressions::MouthStretchRight, value_mapper: None}]),
-        ("/tongueOut", vec![ExpressionMapping{expression: UnifiedExpressions::TongueOut, value_mapper: None}]),
-        ("/tongueUp", vec![ExpressionMapping{expression: UnifiedExpressions::TongueUp, value_mapper: None}]),
-        ("/tongueDown", vec![ExpressionMapping{expression: UnifiedExpressions::TongueDown, value_mapper: None}]),
-        ("/tongueLeft", vec![ExpressionMapping{expression: UnifiedExpressions::TongueLeft, value_mapper: None}]),
-        ("/tongueRight", vec![ExpressionMapping{expression: UnifiedExpressions::TongueRight, value_mapper: None}]),
-        ("/tongueRoll", vec![ExpressionMapping{expression: UnifiedExpressions::TongueRoll, value_mapper: None}]),
-        ("/tongueBendDown", vec![ExpressionMapping{expression: UnifiedExpressions::TongueBendDown, value_mapper: None}]),
-        ("/tongueCurlUp", vec![ExpressionMapping{expression: UnifiedExpressions::TongueCurlUp, value_mapper: None}]),
-        ("/tongueSquish", vec![ExpressionMapping{expression: UnifiedExpressions::TongueSquish, value_mapper: None}]),
-        ("/tongueFlat", vec![ExpressionMapping{expression: UnifiedExpressions::TongueFlat, value_mapper: None}]),
-        ("/tongueTwistLeft", vec![ExpressionMapping{expression: UnifiedExpressions::TongueTwistLeft, value_mapper: None}]),
-        ("/tongueTwistRight", vec![ExpressionMapping{expression: UnifiedExpressions::TongueTwistRight, value_mapper: None}]),
-        ("/mouthPressLeft", vec![ExpressionMapping{expression: UnifiedExpressions::MouthPressLeft, value_mapper: None}]),
-        ("/mouthPressRight", vec![ExpressionMapping{expression: UnifiedExpressions::MouthPressRight, value_mapper: None}]),
-
-        // ProjectBabble Baballonia Eye Tracking
-        ("/LeftEyeX", vec![ExpressionMapping{expression: UnifiedExpressions::EyeLeftX, value_mapper: None}]),
-        ("/RightEyeX", vec![ExpressionMapping{expression: UnifiedExpressions::EyeRightX, value_mapper: None}]),
-        // TODO: ETVR only has one Y value for both eyes, but Babble has separate ones. 
-        // For now, only the left eye Y value is used for simplicity, 
-        // but maybe in the future we could do some kind of averaging or something to use both?
-        // if there's demand for it.
-        ("/LeftEyeY", vec![ExpressionMapping{expression: UnifiedExpressions::EyeY, value_mapper: None}]),
-        // ("/RightEyeY", vec![MappingData{expression: UnifiedExpressions::EyeY, value_mapper: None}]), 
-        ("/LeftEyeLid", vec![ExpressionMapping{expression: UnifiedExpressions::EyeClosedLeft, value_mapper: Some(mapper_invert_normalized)}]),
-        ("/RightEyeLid", vec![ExpressionMapping{expression: UnifiedExpressions::EyeClosedRight, value_mapper: Some(mapper_invert_normalized)}]),
-
-        // ETVR
-        ("/avatar/parameters/LeftEyeX", vec![ExpressionMapping{expression: UnifiedExpressions::EyeLeftX, value_mapper: None}]),
-        ("/avatar/parameters/RightEyeX", vec![ExpressionMapping{expression: UnifiedExpressions::EyeRightX, value_mapper: None}]),
-        ("/avatar/parameters/EyesY", vec![ExpressionMapping{expression: UnifiedExpressions::EyeY, value_mapper: None}]),
-        ("/avatar/parameters/LeftEyeLid", vec![ExpressionMapping{expression: UnifiedExpressions::EyeClosedLeft, value_mapper: None}]),
-        ("/avatar/parameters/RightEyeLid", vec![ExpressionMapping{expression: UnifiedExpressions::EyeClosedRight, value_mapper: None}]),
-
-        ("/avatar/parameters/v2/EyeLeftX", vec![ExpressionMapping{expression: UnifiedExpressions::EyeLeftX, value_mapper: None}]),
-        ("/avatar/parameters/v2/EyeRightX", vec![ExpressionMapping{expression: UnifiedExpressions::EyeRightX, value_mapper: None}]),
-        ("/avatar/parameters/v2/EyeLeftY", vec![ExpressionMapping{expression: UnifiedExpressions::EyeY, value_mapper: None}]),
-        ("/avatar/parameters/v2/EyeLidLeft", vec![ExpressionMapping{expression: UnifiedExpressions::EyeClosedLeft, value_mapper: None}]),
-        ("/avatar/parameters/v2/EyeLidRight", vec![ExpressionMapping{expression: UnifiedExpressions::EyeClosedRight, value_mapper: None}]),
-    ]
-    .into_iter()
-    .collect()
-});

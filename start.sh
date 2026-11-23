@@ -3,9 +3,10 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-OSCAVMGR="${OSCAVMGR:-./target/release/oscavmgr}"
+VISAGE="${VISAGE:-./target/release/visage}"
 FT_MODE="${FT_MODE:-auto}"
 INDEPENDENT_EYES="${INDEPENDENT_EYES:-1}"
+GUI="${GUI:-1}"
 HEADSET_STREAM_SCRIPT="${HEADSET_STREAM_SCRIPT:-./headset-stream.sh}"
 ADB="${ADB:-adb}"
 
@@ -34,6 +35,7 @@ STREAMER_SHELL="${STREAMER_SHELL:-}"
 STREAMER_NEEDS_ROOT="${STREAMER_NEEDS_ROOT:-1}"
 streamer_managed=0
 forward_managed=0
+gui_relay=0
 osc_pid=""
 
 say() { printf '\033[1;32m[start]\033[0m %s\n' "$*"; }
@@ -44,8 +46,13 @@ die() {
 }
 
 preflight() {
-  [ -x "$OSCAVMGR" ] || die "oscavmgr not found or not executable at $OSCAVMGR"
+  [ -x "$VISAGE" ] || die "visage not found or not executable at $VISAGE"
   [[ "$INDEPENDENT_EYES" == 0 || "$INDEPENDENT_EYES" == 1 ]] || die "INDEPENDENT_EYES must be 0 or 1."
+  [[ "$GUI" == 0 || "$GUI" == 1 ]] || die "GUI must be 0 or 1."
+  if [ "$GUI" = "1" ] && ! "$VISAGE" --help | grep -q -- '--gui'; then
+    warn "This visage build has no window; rebuild with: cargo build --release --features qpro-tongue,gui,cameras"
+    GUI=0
+  fi
   [[ "$TONGUE_ENABLED" == 0 || "$TONGUE_ENABLED" == 1 ]] || die "TONGUE_ENABLED must be 0 or 1."
   [[ "$BABBLE_ENABLED" == 0 || "$BABBLE_ENABLED" == 1 ]] || die "BABBLE_ENABLED must be 0 or 1."
   if [ "$BABBLE_ENABLED" = "1" ]; then
@@ -56,7 +63,7 @@ preflight() {
     if ((10#$BABBLE_PORT < 1 || 10#$BABBLE_PORT > 65535)); then
       die "BABBLE_PORT must be between 1 and 65535."
     fi
-    if ! "$OSCAVMGR" openxr --help | grep -q -- '--babble'; then
+    if ! "$VISAGE" openxr --help | grep -q -- '--babble'; then
       die "Rebuild combined eye/mouth support: cargo build --release --features openxr,babble"
     fi
   fi
@@ -65,26 +72,41 @@ preflight() {
   if [ -n "$TONGUE_DIRECTION_MODEL" ]; then
     [ -f "$TONGUE_DIRECTION_MODEL" ] || die "Tongue direction model not found: $TONGUE_DIRECTION_MODEL"
   fi
-  if ! "$OSCAVMGR" openxr --help | grep -q -- '--tongue-model'; then
+  if ! "$VISAGE" openxr --help | grep -q -- '--tongue-model'; then
     die "Rebuild with tongue support: cargo build --release --features qpro-tongue"
   fi
   if [ -z "$STREAMER_ACTIVITY" ] && [ -z "$STREAMER_SHELL" ]; then
     [ -f "$HEADSET_STREAM_SCRIPT" ] || die "Headset stream script not found: $HEADSET_STREAM_SCRIPT"
     [ "$HEADSET_TONGUE_PORT" = "27273" ] || die "The bundled headset relay listens on port 27273."
+    if [ "$GUI" = "1" ] && "$VISAGE" openxr --help | grep -q -- '--tongue-relay-script'; then
+      gui_relay=1
+    fi
   fi
+}
+
+headset_problem() {
+  [ "$gui_relay" = "1" ] || die "$1"
+  warn "$1"
+  warn "Continuing without the camera relay; use Start headset cameras in the Tongue tab once the headset is ready."
 }
 
 require_device() {
   command -v "$ADB" >/dev/null 2>&1 || die "adb not found: $ADB"
   "$ADB" start-server >/dev/null 2>&1 || true
-  "$ADB" get-state >/dev/null 2>&1 || die "No adb device. Plug in the headset and allow USB debugging."
+  if ! "$ADB" get-state >/dev/null 2>&1; then
+    headset_problem "No adb device. Plug in the headset and allow USB debugging."
+    return 1
+  fi
   say "adb device: $("$ADB" get-serialno 2>/dev/null)"
 }
 
 require_headset_root() {
   local uid
   uid="$("$ADB" shell 'su -c "id -u"' 2>/dev/null | tr -d '\r')"
-  [ "$uid" = "0" ] || die "Headset not rooted this session. Root with Singularity first, then re-run."
+  if [ "$uid" != "0" ]; then
+    headset_problem "Headset not rooted this session. Root with Singularity first, then re-run."
+    return 1
+  fi
   say "headset root: ok"
 }
 
@@ -141,8 +163,12 @@ cleanup() {
   fi
 }
 
-run_oscavmgr() {
-  local args=(--ft-mode "$FT_MODE" openxr)
+run_visage() {
+  local args=(--ft-mode "$FT_MODE")
+  if [ "$GUI" = "1" ]; then
+    args+=(--gui)
+  fi
+  args+=(openxr)
   if [ "$INDEPENDENT_EYES" = "1" ]; then
     local independent_eye_arg=0 eye_arg
     for eye_arg in "$@"; do
@@ -181,12 +207,15 @@ run_oscavmgr() {
     if [ "$TONGUE_DEBUG" = "1" ]; then
       args+=(--tongue-debug)
     fi
+    if [ "$gui_relay" = "1" ]; then
+      args+=(--tongue-relay-script "$HEADSET_STREAM_SCRIPT")
+    fi
   else
     say "camera tongue tracking is disabled (TONGUE_ENABLED=1 to enable)"
   fi
 
-  say "starting oscavmgr ${args[*]}"
-  "$OSCAVMGR" "${args[@]}" "$@" &
+  say "starting visage ${args[*]}"
+  "$VISAGE" "${args[@]}" "$@" &
   osc_pid=$!
   local result=0
   wait "$osc_pid" || result=$?
@@ -199,13 +228,29 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 preflight
+if [ "$gui_relay" = "1" ]; then
+  streamer_managed=1
+  forward_managed=1
+fi
+headset=1
 if [ "$TONGUE_ENABLED" = "1" ] || [ "$LAUNCH_WIVRN" = "1" ]; then
-  require_device
+  require_device || headset=0
 fi
-launch_wivrn
-if [ "$TONGUE_ENABLED" = "1" ]; then
-  require_headset_root
-  start_streamer
-  setup_forward
+if [ "$headset" = "1" ]; then
+  launch_wivrn
 fi
-run_oscavmgr "$@"
+if [ "$TONGUE_ENABLED" = "1" ] && [ "$headset" = "1" ]; then
+  if require_headset_root; then
+    if [ "$gui_relay" = "1" ]; then
+      if start_streamer; then
+        setup_forward
+      else
+        headset_problem "Quest Pro mouth-camera relay did not start."
+      fi
+    else
+      start_streamer
+      setup_forward
+    fi
+  fi
+fi
+run_visage "$@"

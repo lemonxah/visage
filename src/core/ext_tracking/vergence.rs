@@ -27,7 +27,7 @@ impl Vergence {
     }
 
     pub fn split(&mut self, combined: Vec3, left_x: f32, right_x: f32) -> [Vec3; 2] {
-        if !left_x.is_finite() || !right_x.is_finite() {
+        if !left_x.is_finite() || !right_x.is_finite() || !combined.is_finite() {
             return [combined; 2];
         }
 

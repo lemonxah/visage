@@ -25,10 +25,11 @@ mod ext_autopilot;
 mod ext_gogo;
 mod ext_oscjson;
 mod ext_storage;
-mod ext_tracking;
+pub mod ext_tracking;
 #[cfg(feature = "openxr")]
 pub use ext_tracking::OpenXrArgs;
 mod folders;
+pub mod live;
 mod oscquery;
 mod watchdog;
 
@@ -38,6 +39,9 @@ pub const PARAM_PREFIX: &str = "/avatar/parameters/";
 const AVATAR_PREFIX: &str = "/avatar/change";
 const FULL_FT_ADDR: &str = "/avatar/avatarfullfacetracking";
 const TRACK_PREFIX: &str = "/tracking/trackers/";
+const VRSYSTEM_PREFIX: &str = "/tracking/vrsystem/";
+const MAX_DELTA_T: f32 = 0.1;
+const MESSAGES_PER_BUNDLE: usize = 30;
 const INPUT_PREFIX: &str = "/input/";
 
 pub type AvatarParameters = HashMap<Arc<str>, OscType>;
@@ -63,6 +67,9 @@ pub struct AvatarOsc {
     ext_tracking: ext_tracking::ExtTracking,
     _oscquery: Option<oscquery::OscQueryAdvert>,
     multi: MultiProgress,
+    vrc_tracking: bool,
+    send_buf: Vec<u8>,
+    listener: Option<UdpSocket>,
     avatar_file: Option<String>,
 }
 
@@ -81,6 +88,11 @@ impl AvatarOsc {
             Ipv4Addr::LOCALHOST
         });
 
+        let listen_addr = SocketAddr::new(ip, args.osc_port);
+        let listener = UdpSocket::bind(listen_addr).unwrap_or_else(|e| {
+            panic!("cannot listen for OSC on {listen_addr}: {e} (is another Visage, oscavmgr or VRCFaceTracking running?)")
+        });
+
         let upstream = UdpSocket::bind("0.0.0.0:0").expect("bind upstream socket");
         upstream
             .connect(SocketAddr::new(ip, args.vrc_port))
@@ -89,6 +101,7 @@ impl AvatarOsc {
         let ext_autopilot = ext_autopilot::ExtAutoPilot::new();
         let ext_storage = ext_storage::ExtStorage::new();
         let ext_gogo = ext_gogo::ExtGogo::new();
+        let vrc_tracking = !provider_tracks_poses(&args.face);
         let ext_tracking = ext_tracking::ExtTracking::new(args.face, args.ft_mode);
         let ext_oscjson = ext_oscjson::ExtOscJson::new();
         let oscquery = match oscquery::OscQueryAdvert::new(args.osc_port) {
@@ -110,6 +123,9 @@ impl AvatarOsc {
             ext_tracking,
             _oscquery: oscquery,
             multi,
+            vrc_tracking,
+            send_buf: Vec::with_capacity(rosc::decoder::MTU),
+            listener: Some(listener),
             avatar_file: args.avatar,
         }
     }
@@ -118,10 +134,18 @@ impl AvatarOsc {
         self.upstream.send(buf)
     }
 
+    fn send_packet(&mut self, packet: &OscPacket) {
+        self.send_buf.clear();
+        if rosc::encoder::encode_into(packet, &mut self.send_buf).is_ok() {
+            let _ = self.upstream.send(&self.send_buf);
+        }
+    }
+
     pub fn handle_messages(&mut self) {
         let ip = self.ip;
-        let listener =
-            UdpSocket::bind(SocketAddr::new(ip, self.osc_port)).expect("bind listener socket");
+        let Some(listener) = self.listener.take() else {
+            panic!("OSC listener already in use");
+        };
 
         let lo = UdpSocket::bind("0.0.0.0:0").expect("bind self socket");
         lo.connect(SocketAddr::new(ip, self.osc_port)).unwrap();
@@ -167,7 +191,7 @@ impl AvatarOsc {
                 if addr == lo_addr {
                     self.process(&mut state);
                     watchdog.update();
-                    state.delta_t = last_frame.elapsed().as_secs_f32();
+                    state.delta_t = last_frame.elapsed().as_secs_f32().min(MAX_DELTA_T);
                     last_frame = Instant::now();
                     continue;
                 }
@@ -176,33 +200,52 @@ impl AvatarOsc {
                 {
                     state.status.trip_recv_counter();
                     if packet.addr.starts_with(PARAM_PREFIX) {
-                        let name: Arc<str> = packet.addr[PARAM_PREFIX.len()..].into();
-                        if &*name == "VSync" {
+                        let name = &packet.addr[PARAM_PREFIX.len()..];
+                        if name == "VSync" {
                             state.self_drive.store(false, Ordering::Relaxed);
                             self.process(&mut state);
-                            state.delta_t = last_frame.elapsed().as_secs_f32();
+                            state.delta_t = last_frame.elapsed().as_secs_f32().min(MAX_DELTA_T);
                             last_frame = Instant::now();
                             watchdog.update();
                         } else if let Some(arg) = packet.args.into_iter().next() {
-                            self.ext_storage.notify(&name, &arg);
-                            self.ext_gogo.notify(&name, &arg);
-                            state.params.insert(name, arg);
+                            self.ext_storage.notify(name, &arg);
+                            self.ext_gogo.notify(name, &arg);
+                            if let Some(slot) = state.params.get_mut(name) {
+                                *slot = arg;
+                            } else {
+                                state.params.insert(name.into(), arg);
+                            }
                         }
-                    } else if packet.addr.starts_with(TRACK_PREFIX) {
+                    } else if let Some(tracker) = packet
+                        .addr
+                        .strip_prefix(VRSYSTEM_PREFIX)
+                        .or_else(|| packet.addr.strip_prefix(TRACK_PREFIX))
+                    {
+                        if !self.vrc_tracking {
+                            continue;
+                        }
                         if let [OscType::Float(x), OscType::Float(y), OscType::Float(z), OscType::Float(ex), OscType::Float(ey), OscType::Float(ez)] =
                             packet.args[..]
                         {
+                            if ![x, y, z, ex, ey, ez].iter().all(|v| v.is_finite()) {
+                                continue;
+                            }
                             let transform = Affine3A::from_rotation_translation(
-                                Quat::from_euler(glam::EulerRot::ZXY, ex, ey, ez),
+                                Quat::from_euler(
+                                    glam::EulerRot::YXZ,
+                                    ey.to_radians(),
+                                    ex.to_radians(),
+                                    ez.to_radians(),
+                                ),
                                 Vec3::new(x, y, z),
                             );
 
-                            if packet.addr[TRACK_PREFIX.len()..].starts_with("head") {
+                            if tracker.starts_with("head") {
                                 state.tracking.last_received = Instant::now();
                                 state.tracking.head = transform;
-                            } else if packet.addr[TRACK_PREFIX.len()..].starts_with("leftwrist") {
+                            } else if tracker.starts_with("leftwrist") {
                                 state.tracking.left_hand = transform;
-                            } else if packet.addr[TRACK_PREFIX.len()..].starts_with("rightwrist") {
+                            } else if tracker.starts_with("rightwrist") {
                                 state.tracking.right_hand = transform;
                             }
                         }
@@ -217,19 +260,26 @@ impl AvatarOsc {
                         if let [OscType::String(avatar)] = &packet.args[..] {
                             // VRC re-sends avatarfullfacetracking after /avatar/change
                             state.avatar_native_ft = false;
-                            self.avatar(AvatarIdentifier::Uid(avatar.clone()), &mut state);
+                            self.avatar(AvatarIdentifier::Uid(avatar.clone()));
                         }
                     } else {
-                        log::info!("Received data: {:?}", packet);
+                        log::debug!("Received data: {:?}", packet);
                     }
                 }
             };
         }
     }
 
-    fn avatar(&mut self, avatar: AvatarIdentifier, state: &mut AppState) {
+    fn avatar(&mut self, avatar: AvatarIdentifier) {
         info!("Avatar changed: {:?}", avatar);
-        let osc_root_node = self.ext_oscjson.avatar(&avatar);
+        self.ext_oscjson.request(avatar);
+    }
+
+    fn apply_avatar(
+        &mut self,
+        osc_root_node: Option<ext_oscjson::OscJsonNode>,
+        state: &mut AppState,
+    ) {
         if let Some(osc_root_node) = osc_root_node.as_ref() {
             self.ext_tracking.osc_json(osc_root_node);
 
@@ -259,7 +309,7 @@ impl AvatarOsc {
                         *DRIVE_ON,
                     );
                     log::warn!(
-                        "The {} parameter helps OscAvMgr keep in sync with your avatar's animator.",
+                        "The {} parameter helps Visage keep in sync with your avatar's animator.",
                         vsync_name
                     );
                     log::warn!(
@@ -293,9 +343,12 @@ impl AvatarOsc {
         );
 
         if self.ext_oscjson.step() {
-            self.avatar(AvatarIdentifier::Default, state);
+            self.avatar(AvatarIdentifier::Default);
         } else if let Some(path) = self.avatar_file.take() {
-            self.avatar(AvatarIdentifier::Path(path.clone()), state);
+            self.avatar(AvatarIdentifier::Path(path));
+        }
+        if let Some(osc_root_node) = self.ext_oscjson.poll() {
+            self.apply_avatar(osc_root_node, state);
         }
 
         self.ext_storage.step(&mut bundle);
@@ -304,30 +357,35 @@ impl AvatarOsc {
         self.ext_autopilot
             .step(state, &self.ext_tracking, &mut bundle);
 
-        if let Some(packet) = bundle.content.first() {
-            if let OscPacket::Message(..) = packet {
-                rosc::encoder::encode(packet)
-                    .ok()
-                    .and_then(|buf| self.send_upstream(&buf).ok());
-                bundle.content.remove(0);
-            }
+        let mut content = std::mem::take(&mut bundle.content);
+        if matches!(content.first(), Some(OscPacket::Message(..))) {
+            let first = content.remove(0);
+            self.send_packet(&first);
         }
 
         state.status.trip_fps_counter();
-        state.status.set_sent_count(bundle.content.len() as _);
+        state.status.set_sent_count(content.len() as _);
         state.status.recv_summary();
 
-        for bundle in bundle.content.chunks(30).map(|chunk| {
-            let mut bundle = OscBundle::new_bundle();
-            bundle.content.extend_from_slice(chunk);
-            bundle
-        }) {
-            bundle
-                .serialize()
-                .and_then(|buf| self.send_upstream(&buf).ok());
+        while !content.is_empty() {
+            let rest = content.split_off(content.len().min(MESSAGES_PER_BUNDLE));
+            let mut chunk = OscBundle::new_bundle();
+            chunk.content = content;
+            self.send_packet(&OscPacket::Bundle(chunk));
+            content = rest;
         }
 
         state.status.display();
+    }
+}
+
+fn provider_tracks_poses(face: &crate::FaceSetup) -> bool {
+    match face {
+        #[cfg(feature = "openxr")]
+        crate::FaceSetup::Openxr(_) => true,
+        #[cfg(feature = "alvr")]
+        crate::FaceSetup::Alvr => true,
+        _ => false,
     }
 }
 

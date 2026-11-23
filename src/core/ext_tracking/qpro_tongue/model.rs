@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use ort::{environment::Environment, session::Session, value::Tensor};
+use ort::{environment::Environment, session::Session, value::TensorRef};
 
 use super::stream::{Frame, PANEL};
 
@@ -17,6 +17,7 @@ pub struct TongueModel {
     session: Session,
     input_name: String,
     resampler: AreaResampler,
+    input: Vec<f32>,
     pub targets: Vec<String>,
     pub gate: VisibilityGate,
 }
@@ -82,6 +83,7 @@ impl TongueModel {
             session,
             input_name,
             resampler: AreaResampler::new(PANEL, image_size),
+            input: vec![0f32; 2 * image_size * image_size],
             targets,
             gate,
         })
@@ -89,12 +91,11 @@ impl TongueModel {
 
     pub fn infer(&mut self, frame: &Frame) -> anyhow::Result<Vec<f32>> {
         let size = self.resampler.target;
-        let mut cameras = vec![0f32; 2 * size * size];
-        let (left, right) = cameras.split_at_mut(size * size);
+        let (left, right) = self.input.split_at_mut(size * size);
         self.resampler.resample(&frame.left, left);
         self.resampler.resample(&frame.right, right);
 
-        let input = Tensor::from_array(([1usize, 2, size, size], cameras))?;
+        let input = TensorRef::from_array_view(([1usize, 2, size, size], self.input.as_slice()))?;
         let outputs = self
             .session
             .run(ort::inputs![self.input_name.as_str() => input])?;
@@ -105,6 +106,9 @@ impl TongueModel {
                 values.len(),
                 self.targets.len()
             );
+        }
+        if values.iter().any(|v| !v.is_finite()) {
+            anyhow::bail!("model returned non-finite values");
         }
         Ok(values.to_vec())
     }
@@ -186,6 +190,38 @@ impl AreaResampler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bundled_models_run_repeatedly_on_a_reused_buffer() {
+        let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("models/qpro-companion-v3.0.3");
+        let models = [
+            directory.join("qpro-stereo-tongue-v15-gate.onnx"),
+            directory.join("qpro-stereo-tongue-v15-direction.onnx"),
+        ];
+        if !models.iter().all(|path| path.is_file()) {
+            return;
+        }
+        let environment = crate::core::ext_tracking::onnx_environment().unwrap();
+        let frames = [
+            Frame {
+                left: vec![0u8; PANEL * PANEL],
+                right: vec![255u8; PANEL * PANEL],
+            },
+            Frame {
+                left: (0..PANEL * PANEL).map(|i| (i % 251) as u8).collect(),
+                right: (0..PANEL * PANEL).map(|i| (i % 127) as u8).collect(),
+            },
+        ];
+        for path in &models {
+            let mut model = TongueModel::load(&environment, path, 1).unwrap();
+            let first = model.infer(&frames[0]).unwrap();
+            let second = model.infer(&frames[1]).unwrap();
+            let again = model.infer(&frames[0]).unwrap();
+            assert_eq!(first.len(), model.targets.len());
+            assert!(first.iter().chain(&second).all(|v| v.is_finite()));
+            assert_eq!(first, again);
+        }
+    }
 
     #[test]
     fn integer_ratio_is_a_box_average() {

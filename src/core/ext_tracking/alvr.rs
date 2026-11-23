@@ -1,5 +1,6 @@
 use std::{
     sync::{
+        atomic::{AtomicUsize, Ordering},
         mpsc::{Receiver, SyncSender},
         Arc,
     },
@@ -25,6 +26,8 @@ use crate::core::{
 };
 
 use super::{
+    arkit::{arkit_to_unified, pico_to_arkit, ARKIT_COUNT},
+    htc::{htc_to_unified, HtcFacialData},
     unified::{UnifiedExpressions, UnifiedTrackingData, NUM_SHAPES},
     FaceReceiver,
 };
@@ -179,6 +182,9 @@ fn receive_until_err(
     let Ok(mut ws) = builder.connect_insecure() else {
         return Ok(()); // long retry
     };
+    let _ = ws
+        .stream_ref()
+        .set_read_timeout(Some(std::time::Duration::from_secs(30)));
 
     while let Ok(message) = ws.recv_message() {
         match message {
@@ -214,9 +220,11 @@ fn receive_until_err(
                                     &tracking.hand_skeletons,
                                     &mut data,
                                 );
-                                if let Some(face_fb) = tracking.fb_face_expression {
-                                    data.shapes = face2_fb_to_unified(&face_fb);
-                                }
+                                data.shapes = alvr_face_shapes(
+                                    tracking.fb_face_expression.as_deref(),
+                                    tracking.htc_eye_expression.as_deref(),
+                                    tracking.htc_lip_expression.as_deref(),
+                                );
                                 if let Err(e) = sender.try_send(Box::new(data)) {
                                     log::debug!("Failed to send tracking message: {}", e);
                                 }
@@ -244,7 +252,7 @@ fn load_devices(
     if let Some(left_hand) = hand_skeletons[0] {
         data.hands[0] = Some(left_hand[0]);
     }
-    if let Some(right_hand) = hand_skeletons[0] {
+    if let Some(right_hand) = hand_skeletons[1] {
         data.hands[1] = Some(right_hand[0]);
     }
 
@@ -281,5 +289,79 @@ fn load_gazes(gazes: &[Option<Pose>; 2], data: &mut AlvrTrackingData) {
     }
     if let Some(gaze) = gazes[1] {
         data.eye[1] = Some(quat_to_euler(gaze.orientation));
+    }
+}
+
+const FB_FACE_MIN: usize = 63;
+
+static IGNORED_FACE_LEN: AtomicUsize = AtomicUsize::new(0);
+
+fn alvr_face_shapes(
+    fb: Option<&[f32]>,
+    htc_eye: Option<&[f32]>,
+    htc_lip: Option<&[f32]>,
+) -> Option<[f32; NUM_SHAPES]> {
+    if let Some(face) = fb {
+        if face.len() >= FB_FACE_MIN {
+            return face2_fb_to_unified(face);
+        }
+        if face.len() == ARKIT_COUNT {
+            return pico_to_arkit(face).map(|weights| arkit_to_unified(&weights));
+        }
+        if IGNORED_FACE_LEN.swap(face.len(), Ordering::Relaxed) != face.len() {
+            log::warn!(
+                "ALVR: ignoring face data with {} weights (expected 52, 63 or 70)",
+                face.len()
+            );
+        }
+    }
+    HtcFacialData::from_slices(htc_eye, htc_lip).map(|data| htc_to_unified(&data))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::ext_tracking::unified::UnifiedShapeAccessors;
+
+    #[test]
+    fn pico_arkit_weights_are_accepted() {
+        let mut pico = vec![0.0; 52];
+        pico[7] = 0.6;
+        pico[28] = 0.9;
+        let shapes = alvr_face_shapes(Some(&pico), None, None).unwrap();
+        assert_eq!(shapes.getu(UnifiedExpressions::JawOpen), 0.6);
+        assert_eq!(shapes.getu(UnifiedExpressions::EyeClosedLeft), 0.9);
+    }
+
+    #[test]
+    fn fb_weights_still_map() {
+        let mut fb = vec![0.0; 70];
+        fb[24] = 0.4;
+        fb[68] = 0.7;
+        let shapes = alvr_face_shapes(Some(&fb), None, None).unwrap();
+        assert_eq!(shapes.getu(UnifiedExpressions::JawOpen), 0.4);
+        assert_eq!(shapes.getu(UnifiedExpressions::TongueOut), 0.7);
+        assert!(alvr_face_shapes(Some(&fb[..63]), None, None).is_some());
+    }
+
+    #[test]
+    fn htc_weights_map_when_fb_is_missing_or_unusable() {
+        let mut lip = vec![0.0; 37];
+        lip[3] = 0.5;
+        let shapes = alvr_face_shapes(None, None, Some(&lip)).unwrap();
+        assert_eq!(shapes.getu(UnifiedExpressions::JawOpen), 0.5);
+        let shapes = alvr_face_shapes(Some(&[0.1; 10]), None, Some(&lip)).unwrap();
+        assert_eq!(shapes.getu(UnifiedExpressions::JawOpen), 0.5);
+        let mut eye = vec![0.0; 14];
+        eye[2] = 1.0;
+        let shapes = alvr_face_shapes(None, Some(&eye), None).unwrap();
+        assert_eq!(shapes.getu(UnifiedExpressions::EyeClosedRight), 1.0);
+    }
+
+    #[test]
+    fn unusable_face_data_is_ignored() {
+        assert!(alvr_face_shapes(None, None, None).is_none());
+        assert!(alvr_face_shapes(Some(&[]), None, None).is_none());
+        assert!(alvr_face_shapes(Some(&[0.5; 51]), Some(&[0.0; 3]), Some(&[0.0; 5])).is_none());
     }
 }

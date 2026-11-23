@@ -115,12 +115,11 @@ impl UnifiedTrackingData {
                 * 0.5,
         );
 
-	self.setc(
-	    CombinedExpression::EyeX,
-	    (self.getu(UnifiedExpressions::EyeLeftX)
-		+ self.getu(UnifiedExpressions::EyeRightX))
-		* 0.5,
-	);
+        self.setc(
+            CombinedExpression::EyeX,
+            (self.getu(UnifiedExpressions::EyeLeftX) + self.getu(UnifiedExpressions::EyeRightX))
+                * 0.5,
+        );
 
         let brow_down_left = self.getu(UnifiedExpressions::BrowLowererLeft) * 0.75
             + self.getu(UnifiedExpressions::BrowPinchLeft) * 0.25;
@@ -491,7 +490,10 @@ impl UnifiedTrackingData {
         // 10..=13 EyeDilation / EyeConstrict are not tracked
 
         // 14..=17 EyeSquintRight..=EyeWideLeft, 18..=97 BrowPinchRight..=TongueTwistLeft
-        for (dst, src) in [(14, EyeSquintRight..=EyeWideLeft), (18, BrowPinchRight..=TongueTwistLeft)] {
+        for (dst, src) in [
+            (14, EyeSquintRight..=EyeWideLeft),
+            (18, BrowPinchRight..=TongueTwistLeft),
+        ] {
             let src = *src.start() as usize..=*src.end() as usize;
             for (i, shape) in self.shapes[src].iter().enumerate() {
                 payload[dst + i] = q(*shape);
@@ -770,26 +772,90 @@ mod tests {
 
     // VRChat tracking keys 14..=97, from creators.vrchat.com/avatars/face-tracking/osc/
     const VRC_KEYS_14_TO_97: [&str; 84] = [
-        "EyeSquintRight", "EyeSquintLeft", "EyeWideRight", "EyeWideLeft",
-        "BrowPinchRight", "BrowPinchLeft", "BrowLowererRight", "BrowLowererLeft",
-        "BrowInnerUpRight", "BrowInnerUpLeft", "BrowOuterUpRight", "BrowOuterUpLeft",
-        "NasalDilationRight", "NasalDilationLeft", "NasalConstrictRight", "NasalConstrictLeft",
-        "CheekSquintRight", "CheekSquintLeft", "CheekPuffRight", "CheekPuffLeft",
-        "CheekSuckRight", "CheekSuckLeft", "JawOpen", "JawRight", "JawLeft", "JawForward",
-        "JawBackward", "JawClench", "JawMandibleRaise", "MouthClosed",
-        "LipSuckUpperRight", "LipSuckUpperLeft", "LipSuckLowerRight", "LipSuckLowerLeft",
-        "LipSuckCornerRight", "LipSuckCornerLeft", "LipFunnelUpperRight", "LipFunnelUpperLeft",
-        "LipFunnelLowerRight", "LipFunnelLowerLeft", "LipPuckerUpperRight", "LipPuckerUpperLeft",
-        "LipPuckerLowerRight", "LipPuckerLowerLeft", "MouthUpperUpRight", "MouthUpperUpLeft",
-        "MouthUpperDeepenRight", "MouthUpperDeepenLeft", "NoseSneerRight", "NoseSneerLeft",
-        "MouthLowerDownRight", "MouthLowerDownLeft", "MouthUpperRight", "MouthUpperLeft",
-        "MouthLowerRight", "MouthLowerLeft", "MouthCornerPullRight", "MouthCornerPullLeft",
-        "MouthCornerSlantRight", "MouthCornerSlantLeft", "MouthFrownRight", "MouthFrownLeft",
-        "MouthStretchRight", "MouthStretchLeft", "MouthDimpleRight", "MouthDimpleLeft",
-        "MouthRaiserUpper", "MouthRaiserLower", "MouthPressRight", "MouthPressLeft",
-        "MouthTightenerRight", "MouthTightenerLeft", "TongueOut", "TongueUp", "TongueDown",
-        "TongueRight", "TongueLeft", "TongueRoll", "TongueBendDown", "TongueCurlUp",
-        "TongueSquish", "TongueFlat", "TongueTwistRight", "TongueTwistLeft",
+        "EyeSquintRight",
+        "EyeSquintLeft",
+        "EyeWideRight",
+        "EyeWideLeft",
+        "BrowPinchRight",
+        "BrowPinchLeft",
+        "BrowLowererRight",
+        "BrowLowererLeft",
+        "BrowInnerUpRight",
+        "BrowInnerUpLeft",
+        "BrowOuterUpRight",
+        "BrowOuterUpLeft",
+        "NasalDilationRight",
+        "NasalDilationLeft",
+        "NasalConstrictRight",
+        "NasalConstrictLeft",
+        "CheekSquintRight",
+        "CheekSquintLeft",
+        "CheekPuffRight",
+        "CheekPuffLeft",
+        "CheekSuckRight",
+        "CheekSuckLeft",
+        "JawOpen",
+        "JawRight",
+        "JawLeft",
+        "JawForward",
+        "JawBackward",
+        "JawClench",
+        "JawMandibleRaise",
+        "MouthClosed",
+        "LipSuckUpperRight",
+        "LipSuckUpperLeft",
+        "LipSuckLowerRight",
+        "LipSuckLowerLeft",
+        "LipSuckCornerRight",
+        "LipSuckCornerLeft",
+        "LipFunnelUpperRight",
+        "LipFunnelUpperLeft",
+        "LipFunnelLowerRight",
+        "LipFunnelLowerLeft",
+        "LipPuckerUpperRight",
+        "LipPuckerUpperLeft",
+        "LipPuckerLowerRight",
+        "LipPuckerLowerLeft",
+        "MouthUpperUpRight",
+        "MouthUpperUpLeft",
+        "MouthUpperDeepenRight",
+        "MouthUpperDeepenLeft",
+        "NoseSneerRight",
+        "NoseSneerLeft",
+        "MouthLowerDownRight",
+        "MouthLowerDownLeft",
+        "MouthUpperRight",
+        "MouthUpperLeft",
+        "MouthLowerRight",
+        "MouthLowerLeft",
+        "MouthCornerPullRight",
+        "MouthCornerPullLeft",
+        "MouthCornerSlantRight",
+        "MouthCornerSlantLeft",
+        "MouthFrownRight",
+        "MouthFrownLeft",
+        "MouthStretchRight",
+        "MouthStretchLeft",
+        "MouthDimpleRight",
+        "MouthDimpleLeft",
+        "MouthRaiserUpper",
+        "MouthRaiserLower",
+        "MouthPressRight",
+        "MouthPressLeft",
+        "MouthTightenerRight",
+        "MouthTightenerLeft",
+        "TongueOut",
+        "TongueUp",
+        "TongueDown",
+        "TongueRight",
+        "TongueLeft",
+        "TongueRoll",
+        "TongueBendDown",
+        "TongueCurlUp",
+        "TongueSquish",
+        "TongueFlat",
+        "TongueTwistRight",
+        "TongueTwistLeft",
     ];
 
     #[test]
@@ -819,7 +885,7 @@ mod tests {
     fn native_payload_prefers_eye_tracker_gaze() {
         let mut data = UnifiedTrackingData::default();
         data.setu(UnifiedExpressions::EyeLeftX, -1.0); // ignored when eyes are tracked
-        // euler x = up, y = left (sent negated as VRC pitch-down / yaw-right)
+                                                       // euler x = up, y = left (sent negated as VRC pitch-down / yaw-right)
         let gaze = Vec3::new(-15f32.to_radians(), -30f32.to_radians(), 0.);
         data.eyes = [Some(gaze), None];
         let p = data.native_face_payload();

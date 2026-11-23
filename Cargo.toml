@@ -1,7 +1,14 @@
 [package]
-name = "oscavmgr"
+name = "visage"
 version = "26.8.0"
 edition = "2021"
+rust-version = "1.86"
+description = "Linux eye, face and tongue tracking relay for VRChat and Resonite, forked from galister/oscavmgr"
+license = "MIT"
+repository = "https://github.com/lemonxah/visage"
+readme = "README.md"
+keywords = ["vr", "vrchat", "osc", "face-tracking", "openxr"]
+categories = ["games"]
 
 [dependencies]
 env_logger = "0.11.6"
@@ -30,11 +37,23 @@ hickory-proto = { version = "0.26.1", features = ["mdns"] }
 socket2 = "0.6.5"
 if-addrs = { version = "0.15.0", features = ["link-local"] }
 mdns-sd = "0.20.3"
+libc = { version = "0.2.189", optional = true }
+eframe = { version = "0.37.0", optional = true, default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
 ort = { version = "=2.0.0-rc.15", optional = true, default-features = false, features = ["std", "download-binaries", "tls-native", "copy-dylibs", "api-31"] }
+serialport = { version = "4.10.1", optional = true, default-features = false }
+zune-jpeg = { version = "0.5.15", optional = true }
+v4l = { version = "0.14.0", optional = true }
 
 [features]
 default = ["alvr", "openxr", "babble"]
 alvr = ["dep:alvr_events", "dep:alvr_common", "dep:sysinfo"]
 openxr = ["dep:openxr"]
 babble = []
-qpro-tongue = ["openxr", "dep:ort"]
+qpro-tongue = ["openxr", "dep:ort", "dep:libc"]
+gui = ["dep:eframe", "dep:libc"]
+cameras = ["babble", "dep:ort", "dep:serialport", "dep:zune-jpeg", "dep:v4l"]
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true

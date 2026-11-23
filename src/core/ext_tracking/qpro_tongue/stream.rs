@@ -3,7 +3,7 @@ use std::{
     net::{Ipv4Addr, SocketAddr, TcpStream},
     sync::{Arc, Condvar, Mutex},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 pub const PANEL: usize = 400;
@@ -28,6 +28,7 @@ pub struct Frame {
 struct SlotState {
     frame: Option<Frame>,
     connected: bool,
+    last_frame: Option<Instant>,
 }
 
 #[derive(Default)]
@@ -37,26 +38,37 @@ pub struct FrameSlot {
 }
 
 impl FrameSlot {
+    fn lock(&self) -> std::sync::MutexGuard<'_, SlotState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     pub fn take(&self, timeout: Duration) -> Option<Frame> {
-        let state = self.state.lock().unwrap();
+        let state = self.lock();
         let (mut state, _) = self
             .signal
             .wait_timeout_while(state, timeout, |s| s.frame.is_none())
-            .unwrap();
+            .unwrap_or_else(|e| e.into_inner());
         state.frame.take()
     }
 
     pub fn connected(&self) -> bool {
-        self.state.lock().unwrap().connected
+        self.lock().connected
+    }
+
+    pub fn last_frame(&self) -> Option<Instant> {
+        self.lock().last_frame
     }
 
     fn put(&self, frame: Frame) {
-        self.state.lock().unwrap().frame = Some(frame);
+        let mut state = self.lock();
+        state.frame = Some(frame);
+        state.last_frame = Some(Instant::now());
+        drop(state);
         self.signal.notify_one();
     }
 
     fn set_connected(&self, connected: bool) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.lock();
         state.connected = connected;
         if !connected {
             state.frame = None;
@@ -131,13 +143,23 @@ fn extract_frame(header: &Header, payload: &[u8]) -> Option<Frame> {
     })
 }
 
-fn read_frames(stream: &mut TcpStream, slot: &FrameSlot) -> anyhow::Result<()> {
+fn read_frames(
+    stream: &mut TcpStream,
+    slot: &FrameSlot,
+    address: SocketAddr,
+    streaming: &mut bool,
+) -> anyhow::Result<()> {
     let mut header_bytes = [0u8; HEADER_BYTES];
     let mut payload = Vec::new();
     let mut warned = false;
     loop {
         stream.read_exact(&mut header_bytes)?;
         let header = parse_header(&header_bytes)?;
+        if !*streaming {
+            *streaming = true;
+            slot.set_connected(true);
+            log::info!("Tongue: camera stream connected on {address}");
+        }
         payload.resize(header.payload_bytes, 0);
         stream.read_exact(&mut payload)?;
         match extract_frame(&header, &payload) {
@@ -165,12 +187,16 @@ pub fn spawn(port: u16) -> Arc<FrameSlot> {
             if let Ok(mut stream) = TcpStream::connect_timeout(&address, CONNECT_TIMEOUT) {
                 let _ = stream.set_nodelay(true);
                 let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
-                log::info!("Tongue: camera stream connected on {address}");
-                worker_slot.set_connected(true);
-                if let Err(e) = read_frames(&mut stream, &worker_slot) {
-                    log::warn!("Tongue: camera stream closed: {e}");
+                let mut streaming = false;
+                let result = read_frames(&mut stream, &worker_slot, address, &mut streaming);
+                if streaming {
+                    if let Err(e) = result {
+                        log::warn!("Tongue: camera stream closed: {e}");
+                    }
+                    worker_slot.set_connected(false);
+                } else if let Err(e) = result {
+                    log::debug!("Tongue: camera port open but no stream: {e}");
                 }
-                worker_slot.set_connected(false);
             }
             thread::sleep(RETRY_DELAY);
         })

@@ -6,112 +6,175 @@ use std::{
     collections::HashMap,
     fs::File,
     io::{Read, Write},
-    sync::Arc,
+    sync::{mpsc, Arc},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
-use super::{bundle::AvatarBundle, folders::CONFIG_DIR};
+use super::{bundle::AvatarBundle, folders::config_file};
+
+const OSCJSON_SERVICE: &str = "_oscjson._tcp.local.";
 
 pub struct ExtOscJson {
-    mdns: ServiceDaemon,
-    mdns_recv: mdns_sd::Receiver<ServiceEvent>,
+    _mdns: Option<ServiceDaemon>,
+    mdns_recv: Option<mdns_sd::Receiver<ServiceEvent>>,
     oscjson_addr: Option<Arc<str>>,
-    next_run: std::time::Instant,
+    next_run: Instant,
     client: reqwest::blocking::Client,
+    pending: Option<mpsc::Receiver<Option<OscJsonNode>>>,
 }
 
 impl ExtOscJson {
     pub fn new() -> Self {
-        let mdns = ServiceDaemon::new().unwrap();
-        let mdns_recv = mdns.browse("_oscjson._tcp.local.").unwrap();
-        let client = reqwest::blocking::Client::new();
+        let (mdns, mdns_recv) = match ServiceDaemon::new()
+            .and_then(|mdns| mdns.browse(OSCJSON_SERVICE).map(|recv| (mdns, recv)))
+        {
+            Ok((mdns, recv)) => (Some(mdns), Some(recv)),
+            Err(e) => {
+                warn!("mDNS browsing unavailable, avatar parameters will not be discovered: {e}");
+                (None, None)
+            }
+        };
+        let client = reqwest::blocking::Client::builder()
+            .connect_timeout(Duration::from_secs(2))
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap_or_else(|e| {
+                warn!("Falling back to default HTTP client: {e}");
+                reqwest::blocking::Client::new()
+            });
 
         Self {
-            mdns,
+            _mdns: mdns,
             mdns_recv,
             oscjson_addr: None,
-            next_run: std::time::Instant::now(),
+            next_run: Instant::now(),
             client,
+            pending: None,
         }
     }
 
     pub fn step(&mut self) -> bool {
         let mut notify_avatar = false;
-        if self.next_run > std::time::Instant::now() {
+        let Some(recv) = self.mdns_recv.as_ref() else {
+            return notify_avatar;
+        };
+        if self.next_run > Instant::now() {
             return notify_avatar;
         }
-        self.next_run = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        self.next_run = Instant::now() + Duration::from_secs(15);
 
-        for event in self.mdns_recv.try_iter() {
-            if let ServiceEvent::ServiceResolved(info) = event {
-                if !info.get_fullname().starts_with("VRChat-Client-") {
-                    continue;
-                }
-                let addr = info.get_addresses().iter().next().unwrap();
-                info!(
-                    "Found OSCJSON service: {} @ {}:{}",
-                    info.get_fullname(),
-                    addr,
-                    info.get_port()
-                );
-
-                if self.oscjson_addr.is_none() {
-                    notify_avatar = true;
-                }
-
-                self.oscjson_addr =
-                    Some(format!("http://{}:{}/avatar", addr, info.get_port()).into());
+        for event in recv.try_iter() {
+            let ServiceEvent::ServiceResolved(info) = event else {
+                continue;
+            };
+            if !info.get_fullname().starts_with("VRChat-Client-") {
+                continue;
             }
+            let addresses = info.get_addresses_v4();
+            let Some(addr) = addresses
+                .iter()
+                .find(|a| a.is_loopback())
+                .or_else(|| addresses.iter().next())
+            else {
+                continue;
+            };
+            info!(
+                "Found OSCJSON service: {} @ {}:{}",
+                info.get_fullname(),
+                addr,
+                info.get_port()
+            );
+
+            if self.oscjson_addr.is_none() {
+                notify_avatar = true;
+            }
+
+            self.oscjson_addr = Some(format!("http://{}:{}/avatar", addr, info.get_port()).into());
         }
 
-        if self.oscjson_addr.is_some() && notify_avatar {
-            self.avatar(&AvatarIdentifier::Default);
-        }
         notify_avatar
     }
 
-    pub fn avatar(&mut self, avatar: &AvatarIdentifier) -> Option<OscJsonNode> {
-        let mut json = String::new();
+    pub fn request(&mut self, avatar: AvatarIdentifier) {
+        let (tx, rx) = mpsc::channel();
+        self.pending = Some(rx);
+        let addr = self.oscjson_addr.clone();
+        let client = self.client.clone();
+        let spawned = thread::Builder::new()
+            .name("avatar-json".into())
+            .spawn(move || {
+                let _ = tx.send(load_avatar(&avatar, addr.as_deref(), &client));
+            });
+        if let Err(e) = spawned {
+            warn!("Could not start avatar json fetch: {e}");
+            self.pending = None;
+        }
+    }
 
-        if let AvatarIdentifier::Path(path) = avatar {
-            if let Err(e) = File::open(path).and_then(|mut f| f.read_to_string(&mut json)) {
-                log::error!("Could not read file: {:?}", e);
-                return None;
+    pub fn poll(&mut self) -> Option<Option<OscJsonNode>> {
+        let rx = self.pending.as_ref()?;
+        match rx.try_recv() {
+            Ok(node) => {
+                self.pending = None;
+                Some(node)
             }
-        } else {
-            let Some(addr) = self.oscjson_addr.as_ref() else {
-                warn!("No avatar oscjson address.");
-                return None;
-            };
-
-            thread::sleep(Duration::from_millis(250));
-
-            let Ok(resp) = self.client.get(addr.as_ref()).send() else {
-                warn!("Failed to send avatar json request.");
-                return None;
-            };
-
-            let Ok(text) = resp.text() else {
-                warn!("No payload in avatar json response.");
-                return None;
-            };
-
-            json = text;
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.pending = None;
+                Some(None)
+            }
         }
+    }
+}
 
-        let path = format!("{}/{}", CONFIG_DIR.as_ref(), "oscavmgr-avatar.json");
-        if let Err(e) = File::create(path).and_then(|mut f| f.write_all(json.as_bytes())) {
-            warn!("Could not write avatar json file: {:?}", e);
+fn load_avatar(
+    avatar: &AvatarIdentifier,
+    addr: Option<&str>,
+    client: &reqwest::blocking::Client,
+) -> Option<OscJsonNode> {
+    let mut json = String::new();
+
+    if let AvatarIdentifier::Path(path) = avatar {
+        if let Err(e) = File::open(path).and_then(|mut f| f.read_to_string(&mut json)) {
+            log::error!("Could not read file: {:?}", e);
+            return None;
         }
+    } else {
+        let Some(addr) = addr else {
+            warn!("No avatar oscjson address.");
+            return None;
+        };
 
-        match serde_json::from_str(&json) {
-            Ok(root_node) => Some(root_node),
+        thread::sleep(Duration::from_millis(250));
+
+        let resp = match client.get(addr).send() {
+            Ok(resp) => resp,
             Err(e) => {
-                warn!("Failed to deserialize avatar json: {}\n", e);
-                debug!("{}", json);
-                None
+                warn!("Failed to fetch avatar json: {e}");
+                return None;
             }
+        };
+
+        let Ok(text) = resp.text() else {
+            warn!("No payload in avatar json response.");
+            return None;
+        };
+
+        json = text;
+    }
+
+    let path = config_file("avatar.json", None);
+    if let Err(e) = File::create(path).and_then(|mut f| f.write_all(json.as_bytes())) {
+        warn!("Could not write avatar json file: {:?}", e);
+    }
+
+    match serde_json::from_str(&json) {
+        Ok(root_node) => Some(root_node),
+        Err(e) => {
+            warn!("Failed to deserialize avatar json: {}\n", e);
+            debug!("{}", json);
+            None
         }
     }
 }

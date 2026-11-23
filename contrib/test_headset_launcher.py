@@ -41,7 +41,7 @@ class BundledAssetsTests(unittest.TestCase):
 
 class LauncherTests(unittest.TestCase):
     def setUp(self):
-        temporary = tempfile.TemporaryDirectory(prefix="oscavmgr-launcher-")
+        temporary = tempfile.TemporaryDirectory(prefix="visage-launcher-")
         self.addCleanup(temporary.cleanup)
         self.directory = Path(temporary.name)
         # A standalone checkout with spaces in its path and no sibling qpro-ft.
@@ -64,6 +64,8 @@ args = sys.argv[1:]
 with open(os.environ["QA_LOG"], "a") as log:
     log.write(json.dumps(["adb", *args]) + "\\n")
 command = " ".join(args)
+if os.environ.get("QA_NO_DEVICE") and args[0] not in ("start-server", "forward"):
+    sys.exit(1)
 if args == ["get-state"]:
     print("device")
 elif args == ["get-serialno"]:
@@ -71,7 +73,7 @@ elif args == ["get-serialno"]:
 elif "resolve-activity" in args:
     print("org.meumeu.wivrn/.MainActivity")
 elif command == 'shell su -c "id -u"':
-    print("0")
+    print(os.environ.get("QA_UID", "0"))
 elif command == "shell su -c id":
     print("uid=0(root)")
 elif command == "shell su -c cat /data/local/tmp/questpro-relay-v8.log":
@@ -82,13 +84,13 @@ elif command.startswith("shell su -c /data/local/tmp/questpro-camera-injector ")
 elif args and args[0] == "push":
     assert os.path.isfile(args[1]), args[1]
 ''')
-        self.write_executable(self.project / "target/release/oscavmgr", '''
+        self.write_executable(self.project / "target/release/visage", '''
 import json, os, sys
 if "--help" in sys.argv:
-    print("--tongue-model --babble")
+    print(os.environ.get("QA_HELP", "--tongue-model --babble"))
 else:
     with open(os.environ["QA_LOG"], "a") as log:
-        log.write(json.dumps(["oscavmgr", *sys.argv[1:]]) + "\\n")
+        log.write(json.dumps(["visage", *sys.argv[1:]]) + "\\n")
     sys.exit(int(os.environ.get("QA_OSC_EXIT", "0")))
 ''')
         self.write_executable(mock_bin / "sleep", "")
@@ -129,7 +131,7 @@ sys.exit(int(os.environ.get("QA_CAPTURE_EXIT", "0")))
         pushes = [call for call in calls if call[:2] == ["adb", "push"]]
         self.assertEqual(len(pushes), 3)
         self.assertTrue(all(Path(call[2]).parent == self.project / "headset/bin" for call in pushes))
-        osc = next(call for call in calls if call[0] == "oscavmgr")
+        osc = next(call for call in calls if call[0] == "visage")
         for option, role in (("--tongue-model", "gate"), ("--tongue-direction-model", "direction")):
             self.assertEqual(Path(osc[osc.index(option) + 1]), MODEL_DIR / f"qpro-stereo-tongue-v15-{role}.onnx")
         self.assert_stopped(calls)
@@ -163,8 +165,50 @@ sys.exit(int(os.environ.get("QA_CAPTURE_EXIT", "0")))
         result, calls = self.run_script("start.sh", TONGUE_ENABLED="0", LAUNCH_WIVRN="0")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0][0], "oscavmgr")
+        self.assertEqual(calls[0][0], "visage")
         self.assertNotIn("--tongue-model", calls[0])
+
+    def test_gui_flag_follows_build_support_and_setting(self):
+        for environment, expected in (({}, False),
+                                      ({"QA_HELP": "--tongue-model --babble --gui"}, True),
+                                      ({"QA_HELP": "--tongue-model --babble --gui", "GUI": "0"}, False)):
+            with self.subTest(environment=environment):
+                self.log.unlink(missing_ok=True)
+                result, calls = self.run_script("start.sh", **environment)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                osc = next(call for call in calls if call[0] == "visage")
+                self.assertEqual("--gui" in osc, expected)
+                if expected:
+                    self.assertLess(osc.index("--gui"), osc.index("openxr"))
+
+    def test_unready_headset_without_gui_still_fails(self):
+        for environment in ({"QA_NO_DEVICE": "1"}, {"QA_UID": "2000"}):
+            with self.subTest(environment=environment):
+                self.log.unlink(missing_ok=True)
+                result, calls = self.run_script("start.sh", **environment)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(any(call[0] == "visage" for call in calls))
+
+    def test_gui_starts_without_ready_headset_and_gets_relay_script(self):
+        gui = {"QA_HELP": "--tongue-model --babble --gui --tongue-relay-script"}
+        for environment in ({"QA_NO_DEVICE": "1"}, {"QA_UID": "2000"}, {"QA_RELAY_FAIL": "1"}):
+            with self.subTest(environment=environment):
+                self.log.unlink(missing_ok=True)
+                result, calls = self.run_script("start.sh", **gui, **environment)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("Start headset cameras", result.stderr)
+                osc = next(call for call in calls if call[0] == "visage")
+                self.assertEqual(osc[osc.index("--tongue-relay-script") + 1], "./headset-stream.sh")
+                self.assertFalse(any(call[:4] == ["adb", "shell", "su", "-c"] and call[4].startswith(INJECTOR) for call in calls))
+                self.assertEqual(calls[-1], ["adb", "forward", "--remove", "tcp:27273"])
+
+    def test_gui_with_ready_headset_starts_relay_at_launch(self):
+        result, calls = self.run_script("start.sh", QA_HELP="--tongue-model --babble --gui --tongue-relay-script")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(any(call[:4] == ["adb", "shell", "su", "-c"] and call[4].startswith(INJECTOR) for call in calls))
+        osc = next(call for call in calls if call[0] == "visage")
+        self.assertIn("--tongue-relay-script", osc)
+        self.assert_stopped(calls)
 
     def test_invalid_settings_fail_before_contacting_headset(self):
         for setting in ({"PORT": "65536"}, {"PORT": "0"}, {"PORT": "bad"},

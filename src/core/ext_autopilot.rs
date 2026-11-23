@@ -169,7 +169,7 @@ impl ExtAutoPilot {
 
         if FLIGHT_INTS.contains(emote) && left_pos.y > head_pos.y && right_pos.y > head_pos.y {
             if !self.jumped && self.jump_cd <= 0 {
-                let diff = (left_pos.y + left_pos.y) * 0.5 + 0.1 - head_pos.y;
+                let diff = (left_pos.y + right_pos.y) * 0.5 + 0.1 - head_pos.y;
                 let diff = diff.clamp(0., 0.3);
 
                 bundle.send_input_button("Jump", true);
@@ -219,7 +219,7 @@ fn trilaterate(r1: f32, r2: f32, r3: f32, r4: f32) -> Vec3 {
     let y = ((r1_sq - r3 * r3 + i * i + j * j) / (2. * j)) - (i / j * x);
 
     let z1 = (r1_sq - x * x - y * y).sqrt();
-    let z2 = -1. * z1;
+    let z2 = -z1;
 
     let ans1 = P1 + x * e_x + y * e_y + z1 * e_z;
     let ans2 = P1 + x * e_x + y * e_y + z2 * e_z;
